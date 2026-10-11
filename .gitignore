@@ -1,0 +1,22 @@
+# Conteúdo baixado/gerado — recriável pelos passos do README.md
+/src/
+/steamcmd/
+/backups/
+
+# server/: só o que escrevemos à mão fica versionado
+/server/*
+!/server/run-server.sh
+!/server/cstrike
+/server/cstrike/*
+!/server/cstrike/server.cfg
+!/server/cstrike/game_init.cfg
+!/server/cstrike/listip.cfg
+!/server/cstrike/banned.cfg
+
+# game/: só o launcher fica versionado (binários = saída dos builds em src/)
+/game/*
+!/game/run-cs.sh
+
+# Logs e temporários
+*.log
+/tmp/
