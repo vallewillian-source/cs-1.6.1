@@ -36,15 +36,21 @@ fi
 echo ">> compilando OpenXR $VER (loader dinâmico + headers) em container podman"
 podman run --rm --security-opt label=disable \
   -v "$SRC":/src \
-  "$IMG" bash -exc '
+  --entrypoint bash \
+  "$IMG" -exc '
     apt-get update -qq
-    apt-get install -y -qq build-essential cmake python3 libjsoncpp-dev >/dev/null
+    apt-get install -y -qq build-essential cmake python3 libjsoncpp-dev \
+      libgl-dev libglx-dev libopengl-dev libegl-dev libx11-dev \
+      libxrandr-dev libxxf86vm-dev libxi-dev >/dev/null
     cd /src/OpenXR-SDK-Source-*
+    # BUILD_ALL_EXTENSIONS=OFF de propósito: desktop = X11/GLX; EGL/OpenGLES
+    # não são exigidos (com ALL on, ausência deles vira erro fatal).
+    # Configure sempre limpo: CMakeCache de runs antigos persiste flags.
+    rm -rf build
     cmake -B build -S . -DCMAKE_BUILD_TYPE=Release \
       -DCMAKE_INSTALL_PREFIX=/src/install \
       -DBUILD_LOADER=ON -DDYNAMIC_LOADER=ON \
-      -DBUILD_API_LAYERS=OFF -DBUILD_TESTS=OFF -DBUILD_CONFORMANCE_TESTS=OFF \
-      -DBUILD_ALL_EXTENSIONS=ON
+      -DBUILD_API_LAYERS=OFF -DBUILD_TESTS=OFF -DBUILD_CONFORMANCE_TESTS=OFF
     cmake --build build -j"$(nproc)" --target install
   '
 

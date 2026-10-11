@@ -101,6 +101,20 @@ Dentro do jogo: `New Game` para jogar sozinho (com bots do YAPB via console
    `cl_dlls/client_amd64.so`, `cl_dlls/menu_amd64.so`, `dlls/cs_amd64.so`,
    `dlls/yapb_amd64.so`, `extras.pk3`.
 
+6. **Rebuilds rápidos (scripts prontos, todos rootless via podman):**
+
+   ```bash
+   ./scripts/build-xash.sh     # Xash3D FWGS → game/           (branch vr-mod)
+   ./scripts/build-cs16.sh     # CS16Client → game/cstrike/    (branch vr-mod)
+   ./scripts/build-openxr.sh   # OpenXR-SDK (loader+headers) → src/openxr-sdk/install/
+   ```
+
+   O build do Xash normaliza o soname do bzip2 com `patchelf` (a imagem
+   `steamcmd:latest` linka `libbz2.so.1.0`, o Fedora só tem `libbz2.so.1`).
+   Projetos VR (plano em `PLAN.md`): branches de trabalho são `vr-mod` em
+   `src/xash3d-fwgs` e `src/cs16-client`; baseline dos binários flat em
+   `backups/flat-baseline-*/`; arquitetura de Mods em `docs/MODS.md`.
+
 ## Observações e limitações
 
 - **Conteúdo**: os mapas/modelos/sons vêm do HLDS da Valve via SteamCMD

@@ -103,11 +103,21 @@ Convenções:
 
 ### Fase 0 — Infraestrutura VR (queimar o risco do transporte antes de codar o jogo)
 
-- [ ] 🟢 **0.1** Instalar WiVRn via Flatpak *user* (`io.github.wivrn.wivrn`) e instalar o client no Quest 3 pelo wizard do dashboard. *Pronto quando:* headset conecta, mostra a tela virtual e **reproduz o áudio do PC no óculos**.
-- [ ] 🟢 **0.2** Rodar um app OpenXR de teste independente (hello_xr ou equivalente, backend GL) contra o runtime do WiVRn. *Pronto quando:* cena estéreo visível no headset com head tracking — prova o combo Fedora + RTX 4060 + WiVRn + GL.
-- [ ] 🟡 **0.3** Criar `scripts/build-openxr.sh` (rootless): baixar e buildar OpenXR-SDK (loader + headers), no container podman ou vendored. *Pronto quando:* `libopenxr_loader.so` + headers disponíveis para link.
-- [ ] 🟢 **0.4** Criar branch `vr-mod` em `src/xash3d-fwgs` e `src/cs16-client`; salvar baseline dos binários flat atuais (`.so` + `xash3d`). *Pronto quando:* build da branch `vr-mod` sem alterações reproduz o jogo flat funcional (smoke test).
-- [ ] 🟢 **0.5** Criar esqueleto de `docs/MODS.md` e registrar a decisão de ABI (struct versionada + dlopen + capabilities). *Pronto quando:* documento commitado na branch.
+> ✅ **CONCLUÍDA em 2026-10-11.** 0.1/0.2 puladas por decisão do usuário (WiVRn já
+> validado no ambiente). Detalhes: OpenXR-SDK **1.1.63** em `src/openxr-sdk/install/`
+> (loader dinâmico + headers); branches `vr-mod` criadas nos dois repos (base:
+> xash3d `590869d`, cs16-client `6a49bcc`); baseline flat em
+> `backups/flat-baseline-20261011/` (13 arquivos + `MANIFEST.sha256`); rebuild das
+> branches validado com boot + conexão ao dedicado; `docs/MODS.md` versionado.
+> Pegadinha resolvida: a imagem `steamcmd:latest` mudou de base e passou a linkar
+> `libbz2.so.1.0` (soname Ubuntu) — `build-xash.sh` normaliza para `libbz2.so.1`
+> (Fedora) com `patchelf` no pós-build.
+
+- [x] 🟢 **0.1** *(pulado — WiVRn já funciona no ambiente, pelo usuário)* Instalar WiVRn via Flatpak *user* (`io.github.wivrn.wivrn`) e instalar o client no Quest 3 pelo wizard do dashboard. *Pronto quando:* headset conecta, mostra a tela virtual e **reproduz o áudio do PC no óculos**.
+- [x] 🟢 **0.2** *(pulado — WiVRn já funciona no ambiente, pelo usuário)* Rodar um app OpenXR de teste independente (hello_xr ou equivalente, backend GL) contra o runtime do WiVRn. *Pronto quando:* cena estéreo visível no headset com head tracking — prova o combo Fedora + RTX 4060 + WiVRn + GL.
+- [x] 🟡 **0.3** Criar `scripts/build-openxr.sh` (rootless): baixar e buildar OpenXR-SDK (loader + headers), no container podman ou vendored. *Pronto quando:* `libopenxr_loader.so` + headers disponíveis para link.
+- [x] 🟢 **0.4** Criar branch `vr-mod` em `src/xash3d-fwgs` e `src/cs16-client`; salvar baseline dos binários flat atuais (`.so` + `xash3d`). *Pronto quando:* build da branch `vr-mod` sem alterações reproduz o jogo flat funcional (smoke test).
+- [x] 🟢 **0.5** Criar esqueleto de `docs/MODS.md` e registrar a decisão de ABI (struct versionada + dlopen + capabilities). *Pronto quando:* documento commitado na branch.
 
 **Marcador da fase:** transporte Quest 3 ↔ Fedora provado ponta a ponta, sem root, com um app que não é o nosso.
 
