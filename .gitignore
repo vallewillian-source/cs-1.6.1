@@ -21,3 +21,6 @@
 *.log
 /tmp/
 .video_agent/
+
+# Builds dos Mods (fontes ficam em mods/*/; binários vão para game/mods/)
+mods/null/*.so
