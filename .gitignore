@@ -13,9 +13,12 @@
 !/server/cstrike/listip.cfg
 !/server/cstrike/banned.cfg
 
-# game/: só o launcher fica versionado (binários = saída dos builds em src/)
+# game/: só o launcher e configs escritos à mão ficam versionados
 /game/*
 !/game/run-cs.sh
+!/game/cstrike
+/game/cstrike/*
+!/game/cstrike/cstrike.rc
 
 # Logs e temporários
 *.log

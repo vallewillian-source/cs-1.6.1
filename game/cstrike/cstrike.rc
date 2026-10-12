@@ -1,0 +1,5 @@
+// cstrike.rc — necessário para os +comandos da linha de comando
+// (+connect etc.) funcionarem no game dir cstrike: Cbuf_ExecStuffCmds
+// só roda se "stuffcmds" for invocado por um .rc (no HL puro é o
+// valve/valve.rc; o conteúdo do CS do HLDS não traz cstrike.rc).
+stuffcmds

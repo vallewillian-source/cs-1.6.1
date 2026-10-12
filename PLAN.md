@@ -123,11 +123,24 @@ Convenções:
 
 ### Fase 1 — Loader de Mods no engine (fundação da arquitetura)
 
-- [ ] 🟡 **1.1** Escrever `common/mod_api.h` v1 (contrato da seção 2.3: structs, hooks, capabilities). *Pronto quando:* header compila standalone e é consumido por um stub.
-- [ ] 🟡 **1.2** Implementar o loader no engine (`engine/mod_loader.c`): parse de `-mod <nome>`, `dlopen("mod_<nome>.so")`, resolve `ModGetAPI`, valida `api_version`, guarda globals; unload limpo no shutdown. *Pronto quando:* `-mod null` carrega e descarrega sem crash, com log claro.
-- [ ] 🟡 **1.3** Inserir call sites de hooks nos pontos neutros do host: início/fim de frame, pré-setup de câmera (por olho), pós-desenho de HUD, fila de input, criação do contexto GL. *Pronto quando:* cada call site é no-op sem Mod carregado.
-- [ ] 🟢 **1.4** Implementar o Mod `null` (template): loga cada hook com contadores e timestamp. *Pronto quando:* 10+ min de jogo flat com `-mod null`, sem crash e sem alteração de gameplay; vira exemplo do `MODS.md`.
-- [ ] 🟢 **1.5** Regressão flat: comparar comportamento sem `-mod` vs baseline (Fase 0.4) e com `-mod null`. *Pronto quando:* zero diferença funcional.
+> ✅ **CONCLUÍDA em 2026-10-11.** Commit `8d12c80` na branch `vr-mod` do xash3d-fwgs;
+> template em `mods/null/`; contrato v1 congelado em `docs/MODS.md`.
+> Descoberta de arquitetura: `COM_LoadLibrary`/`FS_FindLibrary` força **lowercase** no
+> path da biblioteca (`// always in lower case (why?)` em `filesystem/searchpath.c`) —
+> o loader de Mods usa `dlopen` direto (POSIX) e valida o path com `stat`, resolvendo o
+> diretório do binário via `/proc/self/exe` (case garantido). Mod loga em arquivo próprio
+> (`game/mods/mod_null.log`) porque o `Con_Printf` do engine não vai para stdout em modo
+> gráfico (o canal confiável de log é `-log <arquivo>`, que exige path iniciando com alfanumérico).
+> Descoberta de conteúdo: os `+comandos` da linha de comando (`+connect` etc.) só rodam se um
+> `.rc` invocar `stuffcmds` — `valve/valve.rc` cobre o HL, mas o CS do HLDS não traz `cstrike.rc`;
+> criamos `game/cstrike/cstrike.rc`. Logging do dedicado ligado (`log on` no `server.cfg`) —
+> sem isso nenhum join/drop aparece em lugar nenhum (stdout do HLDS é bufferizado).
+
+- [x] 🟡 **1.1** Escrever `common/mod_api.h` v1 (contrato da seção 2.3: structs, hooks, capabilities). *Pronto quando:* header compila standalone e é consumido por um stub. — compilou com `-Wall -Wextra` no `mods/null`.
+- [x] 🟡 **1.2** Implementar o loader no engine (`engine/common/modloader.c`): parse de `-mod <nome>`, `dlopen("mod_<nome>.so")`, resolve `ModGetAPI`, valida `api_version`, guarda globals; unload limpo no shutdown. *Pronto quando:* `-mod null` carrega e descarrega sem crash, com log claro. — validado em modo dedicado (stdout) com ciclo completo load→init→frames→unload.
+- [x] 🟡 **1.3** Inserir call sites de hooks nos pontos neutros do host: início/fim de frame, pré-setup de câmera (por olho), pós-desenho de HUD, fila de input, criação do contexto GL. *Pronto quando:* cada call site é no-op sem Mod carregado. — `host.c` (frame/input/shutdown/init), `cl_scrn.c` (begin/hud/end), `cl_view.c` (câmera por view pass), `vid_sdl2.c` (video init).
+- [x] 🟢 **1.4** Implementar o Mod `null` (template): loga cada hook com contadores e timestamp. *Pronto quando:* 10+ min de jogo flat com `-mod null`, sem crash e sem alteração de gameplay; vira exemplo do `MODS.md`. — teste longo de 10,5 min conectado ao dedicado.
+- [x] 🟢 **1.5** Regressão flat: comparar comportamento sem `-mod` vs baseline (Fase 0.4) e com `-mod null`. *Pronto quando:* zero diferença funcional. — boot + connect sem `-mod` após as mudanças, idêntico ao baseline funcional.
 
 **Marcador da fase:** o Mod `null` prova que a arquitetura é genérica — nada nela é VR-específico.
 
