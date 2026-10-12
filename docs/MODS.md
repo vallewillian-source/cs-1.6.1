@@ -1,8 +1,14 @@
 # MODS.md — Arquitetura de Mods do CS 1.6 open-source
 
-> **Status: ABI v1 CONGELADA (Fase 1 do `PLAN.md`, 2026-10-11).**
-> Fonte da verdade do contrato: `src/xash3d-fwgs/engine/common/mod_api.h` (branch `vr-mod`).
-> Loader: `src/xash3d-fwgs/engine/common/modloader.c`. Exemplo oficial: `mods/null/`.
+> **Status: ABI v2 (Fase 2 do `PLAN.md`, 2026-10-11).**
+> v1 (Fase 1) congelada; **v2 acrescentou, no FIM das structs**: `mod_view_t.viewport[4]`,
+> `Mod_EyeCount()` e `Mod_AfterEyes()` (estéreo — passes de render por frame e hook
+> pré-2D). Fonte da verdade: `src/xash3d-fwgs/engine/common/mod_api.h` (branch `vr-mod`).
+> Loader: `src/xash3d-fwgs/engine/common/modloader.c`. Mods: `mods/null/` (template) e
+> `mods/vr/` (OpenXR — o primeiro Mod real).
+>
+> Gotcha de build C++: `ModGetAPI` precisa de `extern "C"` (mangling), e a linkagem do
+> mod precisa do fonte ANTES das `-l` (Ubuntu usa `--as-needed` por padrão).
 
 ## 1. O que é um "Mod" aqui
 
@@ -68,7 +74,7 @@ A struct completa está no header (fonte da verdade). Resumo do que o Mod implem
 
 | Mod | Capabilities | Status |
 |-----|--------------|--------|
-| `vr` (OpenXR, WiVRn/Quest 3) | display + input + hud | **este projeto** — Fases 2–4 do `PLAN.md` |
+| `vr` (OpenXR, WiVRn/Quest 3) | display | **em construção** — estéreo da Fase 2 feita (sem headset o init roda em thread com timeout e o jogo segue flat); input/hud nas Fases 3/4 |
 | `null` (template log-only) | nenhuma (só lifecycle + frame) | **feito (Fase 1)** — `mods/null/`, `game/mods/mod_null.so`; também é o teste de gating do engine |
 | *futuro:* arma 6DoF, HD pack, gameplay, acessibilidade | — | pós-MVP, sobre a mesma ABI |
 

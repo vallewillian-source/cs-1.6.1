@@ -133,6 +133,8 @@ static mod_api_t g_api =
 	.Mod_Input = Null_Input,
 	.Mod_HudRedirect = Null_HudRedirect,
 	.Mod_HudPointer = Null_HudPointer,
+	.Mod_EyeCount = NULL,  // v2: sem estéreo (capabilities=0; nunca chamado)
+	.Mod_AfterEyes = NULL,
 };
 
 mod_api_t *ModGetAPI( void )

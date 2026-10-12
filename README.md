@@ -107,6 +107,8 @@ Dentro do jogo: `New Game` para jogar sozinho (com bots do YAPB via console
    ./scripts/build-xash.sh     # Xash3D FWGS → game/           (branch vr-mod)
    ./scripts/build-cs16.sh     # CS16Client → game/cstrike/    (branch vr-mod)
    ./scripts/build-openxr.sh   # OpenXR-SDK (loader+headers) → src/openxr-sdk/install/
+   ./mods/vr/build.sh          # mod_vr (OpenXR) → game/mods/
+   ./mods/null/build.sh        # mod null (template) → game/mods/
    ```
 
    O build do Xash normaliza o soname do bzip2 com `patchelf` (a imagem
@@ -114,6 +116,23 @@ Dentro do jogo: `New Game` para jogar sozinho (com bots do YAPB via console
    Projetos VR (plano em `PLAN.md`): branches de trabalho são `vr-mod` em
    `src/xash3d-fwgs` e `src/cs16-client`; baseline dos binários flat em
    `backups/flat-baseline-*/`; arquitetura de Mods em `docs/MODS.md`.
+
+## VR (Quest 3 via WiVRn) — Fase 2
+
+```bash
+./scripts/run-cs-vr.sh                          # menu em VR (ou flat, se headset off)
+./scripts/run-cs-vr.sh +connect 127.0.0.1:27015 # direto no dedicado
+VR_DEBUG=1 VR_DEBUG_CLEAR=1 ./scripts/run-cs-vr.sh   # debug + cores por olho
+```
+
+- Requer o WiVRn (RPM já instalado) com o dashboard/server rodando e o headset
+  conectado. Sem headset: o mod detecta e o jogo roda **flat** (o init do OpenXR
+  roda em thread com timeout — o jogo nunca congela; se o headset conectar
+  depois, a VR ativa sozinha).
+- Log do mod: `game/mods/mod_vr.log`. Escala de resolução: `VR_RESOLUTION_SCALE`
+  (ex.: `0.8`). Espelho do olho esquerdo aparece na janela do monitor.
+- HUD/menus ainda não são renderizados no headset (Fase 4); controles do Quest
+  não movem o jogador ainda (Fase 3). Nesta fase: estéreo + olhar pela cabeça.
 
 ## Observações e limitações
 

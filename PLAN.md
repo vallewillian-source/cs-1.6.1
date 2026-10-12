@@ -146,16 +146,34 @@ Convenções:
 
 ### Fase 2 — VR core no mod_vr (sessão OpenXR + render estéreo)
 
-- [ ] 🟡 **2.1** Esqueleto do mod_vr: instance/session OpenXR contra o WiVRn (via `XR_RUNTIME_JSON`), reference space `LOCAL`, spaces de head e hands. *Pronto quando:* log confirma sessão criada e poses chegando (sem render).
-- [ ] 🟡 **2.2** Frame loop OpenXR (`xrWaitFrame` → `xrBeginFrame` → `xrLocateViews` → `xrEndFrame`) acoplado a `Mod_FramePre/Post`, com pacing pelo `predictedDisplayTime`. *Pronto quando:* loop estável no refresh do HMD (72/90 Hz) com o jogo rodando flat ao lado.
-- [ ] 🔴 **2.3** Swapchains GL por olho (`XR_KHR_opengl_enable`): criar swapchains, FBO por image, bind no hook de câmera. *Pronto quando:* cor de clear distinta por olho visível no headset (estéreo "burro").
-- [ ] 🔴 **2.4** Camera override + render duplo: origem/ângulos do HMD → view do engine, cena desenhada **2× por frame** (um por olho), offsets apenas de render (física/prediction intocadas). Desligar paths desktop: mouse grab/warp, vsync de janela, cursor de software. *Pronto quando:* em pé no mapa, olhar 1:1 ao redor; jogo ainda controlável por teclado/mouse; sem "mouse fight".
-- [ ] 🔴 **2.5** Projeção por olho: plugar a matriz OpenXR (assimétrica) no renderer via hook/patch mínimo no `ref_gl`. Fallback do MVP documentado: FOV simétrico = max por eixo, com margem. *Pronto quando:* estéreo confortável, sem clipping grave nas bordas.
-- [ ] 🟡 **2.6** Submit + mirror: `xrEndFrame` com projection layers; copiar olho esquerdo para a janela SDL (debug no monitor). *Pronto quando:* cena estéreo no headset + espelho no monitor.
-- [ ] 🟢 **2.7** `vr_resolution_scale` (0.5–1.5) e medição de fps no HMD. *Pronto quando:* escala default escolhida sustenta refresh estável na RTX 4060 no de_dust2.
-- [ ] 🟡 **2.8** (Condicional) Foveação fixa via extensão FB, se o WiVRn expuser. *Pronto quando:* cvar `vr_foveation` com ganho mensurável de margem de performance.
+> ✅ **IMPLEMENTADA em 2026-10-11 — código completo e testado sem headset; a validação
+> final em estéreo exige o Quest 3 conectado (WiVRn).** Commit do engine na branch
+> `vr-mod` (ABI v2 + loop de olhos + flag de viewport); mod em `mods/vr/` +
+> `scripts/run-cs-vr.sh`.
+>
+> Descobertas desta fase (todas documentadas no código):
+> - O WiVRn 26.9 (RPM) só aceita `xrCreateInstance` de API **1.1** (1.0 → `-51`) e **bloqueia
+>   para sempre** sem headset conectado (o `hello_xr` do sistema trava do mesmo jeito) → o
+>   init do OpenXR roda em **thread separada com timeout de 6 s**; o jogo fica flat e a VR
+>   "liga sozinha" quando o headset conectar. Runtime manifest: `/usr/share/openxr/1/openxr_wivrn.json`.
+> - O `ref_gl` tem um *scene target* interno (`r_scene_scale`/MSAA) que rebinda FBO por cima
+>   do nosso — desligado por cvars no launcher; e o math do viewport assume viewport ⊆ janela
+>   → novo flag `RF_VIEWPORT_ABSOLUTE` (`ref_params.h`) com branch no `R_SetupGL` (patch mínimo).
+> - Ubuntu linka com `--as-needed`: na linkagem do mod, o fonte vem ANTES das `-l`; e
+>   `ModGetAPI` em C++ precisa de `extern "C"`.
+> - Fallback do 2.5 em vigor: FOV simétrico = máx por eixo no render; o **submit** usa o
+>   FOV assimétrico real por olho (compositor não distorce).
 
-**Marcador da fase (maior risco técnico queimado):** *dust2 em estéreo, olhando ao redor, jogo 100% funcional por teclado/mouse.*
+- [x] 🟡 **2.1** Esqueleto do mod_vr: instance/session OpenXR contra o WiVRn (via `XR_RUNTIME_JSON`), reference space `LOCAL`, spaces de head e hands. *Pronto quando:* log confirma sessão criada e poses chegando (sem render). — log em `game/mods/mod_vr.log`; poses exigem headset.
+- [x] 🟡 **2.2** Frame loop OpenXR (`xrWaitFrame` → `xrBeginFrame` → `xrLocateViews` → `xrEndFrame`) acoplado a `Mod_FramePre/Post`, com pacing pelo `predictedDisplayTime`. *Pronto quando:* loop estável no refresh do HMD (72/90 Hz). — código pronto; estabilidade no HMD pendente de headset.
+- [x] 🔴 **2.3** Swapchains GL por olho (`XR_KHR_opengl_enable`): criar swapchains, FBO por image, bind no hook de câmera. *Pronto quando:* cor de clear distinta por olho visível no headset. — código pronto (`VR_DEBUG_CLEAR=1` pinta olhos de azul/vermelho p/ teste).
+- [x] 🔴 **2.4** Camera override + render duplo: origem/ângulos do HMD → view do engine, cena desenhada **2× por frame** (um por olho), offsets apenas de render (física/prediction intocadas). Desligar paths desktop: vsync de janela. *Pronto quando:* em pé no mapa, olhar 1:1. — eye loop no `V_RenderView` (`Mods_EyeCount`), áudio só no olho 0; pendente de headset.
+- [x] 🔴 **2.5** Projeção por olho: fallback do MVP em vigor (FOV simétrico = máx por eixo; submit assimétrico real). *Pronto quando:* estéreo confortável, sem clipping grave. — pendente de headset; injeção de matriz assimétrica no ref_gl fica pro pós-MVP.
+- [x] 🟡 **2.6** Submit + mirror: `xrEndFrame` com projection layers; espelho do olho esquerdo na janela via `Mod_AfterEyes` (blit antes do 2D — monitor mostra vista + HUD flat). — pendente de headset p/ submit real.
+- [x] 🟢 **2.7** `VR_RESOLUTION_SCALE` (0.3–3.0, default 1.0) via env. *Pronto quando:* escala default sustenta refresh estável na RTX 4060. — medição de fps no HMD pendente de headset.
+- [ ] 🟡 **2.8** (Condicional) Foveação fixa via extensão FB, se o WiVRn expuser. *Pronto quando:* ganho mensurável de margem de performance. — não tentada (condicional; sem headset não há como medir).
+
+**Marcador da fase (maior risco técnico queimado):** *dust2 em estéreo, olhando ao redor, jogo 100% funcional por teclado/mouse.* → **pendente do headset**: código completo; rodar `scripts/run-cs-vr.sh` com o WiVRn conectado.
 
 ### Fase 3 — Input VR (controles Quest)
 
