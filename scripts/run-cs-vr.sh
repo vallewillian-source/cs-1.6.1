@@ -13,6 +13,15 @@ GAME="$BASE/game"
 
 [ -f "$GAME/mods/mod_vr.so" ] || { echo "ERRO: mods/vr/build.sh ainda não rodou (game/mods/mod_vr.so ausente)"; exit 1; }
 
+# Pré-voo: o init do OpenXR BLOQUEIA enquanto não houver headset conectado
+# a UM (e só um) wivrn-server. Server ausente ou duplicado = jogo abre flat.
+NSRV=$(pgrep -xc wivrn-server || true)
+if [ "$NSRV" = "0" ]; then
+  echo "AVISO: nenhum wivrn-server rodando — abra o wivrn-dashboard e conecte o headset antes (o jogo vai abrir flat)."
+elif [ "$NSRV" -gt 1 ]; then
+  echo "AVISO: $NSRV wivrn-server rodando ao mesmo tempo — o headset pode estar ligado ao errado e o jogo travar no init. Feche os extras (pkill -x wivrn-server) e reconecte o headset."
+fi
+
 # Runtime OpenXR: procura o WiVRn (instalação system, user e Flatpak);
 # override manual com XR_RUNTIME_JSON=
 if [ -z "${XR_RUNTIME_JSON:-}" ]; then
