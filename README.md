@@ -119,6 +119,9 @@ Dentro do jogo: `New Game` para jogar sozinho (com bots do YAPB via console
 
 ## VR (Quest 3 via WiVRn) — Fase 2
 
+Lançamento: item **"Counter-Strike 1.6 VR"** no menu do GNOME (chama
+`scripts/run-cs-vr.sh`) — ou direto no terminal:
+
 ```bash
 ./scripts/run-cs-vr.sh                          # menu em VR (ou flat, se headset off)
 ./scripts/run-cs-vr.sh +connect 127.0.0.1:27015 # direto no dedicado
