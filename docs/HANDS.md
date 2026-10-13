@@ -224,6 +224,15 @@ stretched and look wrong** in the `fit`, `states` and `walk` sheets. That is an 
 fixture, not of the arms — with controllers in hand the IK targets are where your hands actually
 are. Use those sheets for the weapon's fit, size and position; do not judge the arms by them.
 
+<p align="center">
+  <img src="img/contact-sheet-fit.png" alt="Raw fit sheet: twelve views of the right hand holding the pistol, with the arm geometry stretched toward the synthetic hand position" width="80%">
+</p>
+
+<p align="center"><em>The raw <code>fit</code> sheet, unedited, so the caveat above is not a claim you
+have to take on faith: the weapon is correctly sized and seated in the hand in all twelve views, while
+the arm geometry running off to the lower left is the synthetic target stretching the IK. This is what
+a regenerated sheet will look like without a headset attached.</em></p>
+
 The same drawing prints a **numeric report** in the log — it is what allows deciding without
 looking at the image:
 
