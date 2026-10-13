@@ -104,16 +104,13 @@ static void Null_Input( mod_input_sample_t *sample )
 	note_gated( "Mod_Input" );
 }
 
-static void Null_HudRedirect( int enable )
+static void Null_Hud( mod_hud_t *hud )
 {
-	(void)enable;
-	note_gated( "Mod_HudRedirect" );
-}
-
-static void Null_HudPointer( float x, float y, int buttons )
-{
-	(void)x; (void)y; (void)buttons;
-	note_gated( "Mod_HudPointer" );
+	// v8: intercâmbio de HUD/UI. O null não quer nada: deixa as saídas zeradas
+	// (sem canvas, sem cursor virtual) — é o que o engine espera de um Mod que
+	// não mexe no 2D, e o que mantém o jogo flat idêntico.
+	(void)hud;
+	note_gated( "Mod_Hud" );
 }
 
 static const char g_name[] = "null";
@@ -131,10 +128,10 @@ static mod_api_t g_api =
 	.Mod_BeginFrame = Null_BeginFrame,
 	.Mod_EndFrame = Null_EndFrame,
 	.Mod_Input = Null_Input,
-	.Mod_HudRedirect = Null_HudRedirect,
-	.Mod_HudPointer = Null_HudPointer,
+	.Mod_Hud = Null_Hud,
 	.Mod_EyeCount = NULL,  // v2: sem estéreo (capabilities=0; nunca chamado)
 	.Mod_AfterEyes = NULL,
+	.Mod_Overlay2D = NULL, // v3: idem (gated por MOD_CAP_HUD)
 };
 
 mod_api_t *ModGetAPI( void )

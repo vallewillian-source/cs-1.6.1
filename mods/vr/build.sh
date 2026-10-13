@@ -2,6 +2,8 @@
 # Builda o Mod vr (OpenXR) e instala em game/mods/ — rootless via podman.
 # Linka libopenxr_loader (buildado pelo scripts/build-openxr.sh) e copia a
 # lib pro game/mods/ com rpath $ORIGIN (o mod é autossuficiente no host).
+# Semeia também game/mods/vr_weapon.cfg (encaixe da arma) — só se ainda não
+# existir: esse arquivo é para você calibrar, não para o build sobrescrever.
 set -euo pipefail
 
 BASE="$(cd "$(dirname "$0")/../.." && pwd)"
@@ -35,4 +37,8 @@ cp "$SRC/mod_vr.so" "$OUT/mod_vr.so"
 for f in libopenxr_loader.so libopenxr_loader.so.1 libopenxr_loader.so.1.1.63; do
   [ -e "$OXR/lib/$f" ] && cp -a "$OXR/lib/$f" "$OUT/$f"
 done
+
+# encaixe da arma: template só na primeira vez (nunca sobrescreve a sua calibração)
+[ -e "$OUT/vr_weapon.cfg" ] || cp "$SRC/vr_weapon.cfg" "$OUT/vr_weapon.cfg"
+
 echo ">> OK: game/mods/mod_vr.so"
