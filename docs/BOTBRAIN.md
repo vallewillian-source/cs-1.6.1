@@ -1,82 +1,83 @@
-# BOTBRAIN.md — bots com "cérebro lento" (Jev / TypeSafe)
+# BOTBRAIN.md — bots with a "slow brain" (Jev / TypeSafe)
 
-> **Status: V1 (2026-10-13), só de_dust2, cenário defuse.** Roda no servidor
-> dedicado local (`server/`), vale igual para VR e flat (bots vivem no
-> servidor). Fora do escopo do MVP de VR — é uma trilha separada que usa a
-> mesma infraestrutura de servidor.
+> **Status: V1 (2026-10-13), de_dust2 only, defuse scenario.** Runs on the local
+> dedicated server (`server/`), applies equally to VR and flat (bots live on the
+> server). Outside the scope of the VR MVP — it is a separate track that uses the
+> same server infrastructure.
 
-## 1. A ideia em uma frase
+## 1. The idea in one sentence
 
-O **CCSBot** do ReGameDLL continua sendo o músculo (nav, visão, mira, armas,
-combate); um **sidecar Python** pergunta ao modelo **Jev** (TypeSafe) qual é o
-plano *do time* naquela rodada e escreve a resposta num arquivo; a DLL aplica
-nos bots. O Jev nunca está no caminho crítico — o jogo não espera por ele.
+ReGameDLL's **CCSBot** remains the muscle (nav, vision, aim, weapons, combat); a
+**Python sidecar** asks the **Jev** model (TypeSafe) what the *team's* plan is for
+that round and writes the answer to a file; the DLL applies it to the bots. Jev
+is never on the critical path — the game does not wait for it.
 
-Por que assim:
+Why this way:
 
-- **Bots vivem no servidor** → jogador de VR e de flat enfrentam exatamente os
-  mesmos bots; nada muda no cliente.
-- **1 request por decisão** é o contrato do Jev (estado compacto entra, uma
-  escolha de um conjunto fechado sai). É barato, cacheável e não exige latência
-  de tempo real: a decisão cai no freeze ou num evento, não em cada tique.
-- **Transporte por arquivo** → zero rede dentro do `cs.so` (32-bit), zero
-  threads novas, à prova de crash: sidecar morto = bots seguem no algoritmo.
+- **Bots live on the server** → VR and flat players face exactly the same bots;
+  nothing changes on the client.
+- **1 request per decision** is Jev's contract (compact state in, one choice from
+  a closed set out). It is cheap, cacheable and does not require real-time
+  latency: the decision lands on freeze or on an event, not on every tick.
+- **File transport** → zero network inside `cs.so` (32-bit), zero new threads,
+  crash-proof: dead sidecar = bots keep going on the algorithm.
 
 ```
-servidor (podman, 32-bit)                    host (Python)
+server (podman, 32-bit)                      host (Python)
 ┌──────────────────────────────────┐        ┌───────────────────────────┐
 │ cs.so (ReGameDLL)                │observe │ tools/botbrain            │
-│  CCSBot  — o "músculo"           │───────►│  botbrain.py              │
-│  cs_bot_advisor:                 │        │   · assinatura → cache    │
-│   · escreve observe_<t|ct>.txt   │◄───────│   · Jev /v1/systemone     │
-│   · lê plan_<t|ct>.txt           │ plan   │   · escreve plan_*.txt    │
-│   · aplica a intent nos bots     │        │  traces/decisions.jsonl   │
+│  CCSBot  — the "muscle"          │───────►│  botbrain.py              │
+│  cs_bot_advisor:                 │        │   · signature → cache     │
+│   · writes observe_<t|ct>.txt    │◄───────│   · Jev /v1/systemone     │
+│   · reads plan_<t|ct>.txt        │ plan   │   · writes plan_*.txt     │
+│   · applies the intent to bots   │        │  traces/decisions.jsonl   │
 └──────────────────────────────────┘        └───────────────────────────┘
               cstrike/advisor/
 ```
 
-## 2. Arquivos
+## 2. Files
 
-| Arquivo | Papel |
+| File | Role |
 |---|---|
-| `src/ReGameDLL_CS/regamedll/dlls/bot/advisor/cs_bot_advisor.{h,cpp}` | o módulo na DLL: cvars, mailbox, detecção de rodada/evento, intent→comportamento |
-| `patches/regamedll-bot-advisor/` | **cópia canônica** do módulo + `hooks.patch` (as 12 linhas de gancho) — porque `/src/` é ignorado pelo repo; `apply.sh` reaplica (idempotente) e o `build-regamedll.sh` o chama |
-| `tools/botbrain/botbrain.py` | o daemon (mailbox → cache → Jev → plan) |
-| `tools/botbrain/typesafe.py` | cliente mínimo do Jev (mesmo protocolo/credenciais do clone `jev-ultrafast`) |
-| `tools/botbrain/intents.py` | conjunto fechado de intents + regras do "coach" |
-| `tools/botbrain/run.sh` | sobe o daemon com o venv/`.env` do jev-ultrafast |
-| `scripts/run-botbrain.sh` | sidecar + servidor juntos |
-| `scripts/build-regamedll.sh` | build 32-bit do `cs.so` no container (host sem multilib) |
-| `server/cstrike/advisor.cfg` | bots (`bot_quota 8`…) + cvars do advisor |
+| `src/ReGameDLL_CS/regamedll/dlls/bot/advisor/cs_bot_advisor.{h,cpp}` | the module in the DLL: cvars, mailbox, round/event detection, intent→behavior |
+| `patches/regamedll-bot-advisor/` | **canonical copy** of the module + `hooks.patch` (the 12 hook lines) — because `/src/` is ignored by the repo; `apply.sh` re-applies it (idempotent) and `build-regamedll.sh` calls it |
+| `tools/botbrain/botbrain.py` | the daemon (mailbox → cache → Jev → plan) |
+| `tools/botbrain/typesafe.py` | minimal Jev client (same protocol/credentials as the `jev-ultrafast` clone) |
+| `tools/botbrain/intents.py` | closed set of intents + the "coach" rules |
+| `tools/botbrain/run.sh` | brings up the daemon with jev-ultrafast's venv/`.env` |
+| `scripts/run-botbrain.sh` | sidecar + server together |
+| `scripts/build-regamedll.sh` | 32-bit build of `cs.so` in the container (host without multilib) |
+| `server/cstrike/advisor.cfg` | bots (`bot_quota 8`…) + advisor cvars |
 | `server/cstrike/advisor/` | runtime: `observe_*.txt`, `plan_*.txt`, `plan_cache.json` |
 
-Ganchos no código existente (edições mínimas):
+Hooks in the existing code (minimal edits):
 
 - `CCSBotManager::RestartRound()` → `Advisor_OnRoundStart()`
 - `CCSBotManager::StartFrame()` → `Advisor_FrameUpdate()`
-- `CCSBot::Update()` (antes do dispatch da máquina de estados) → `Advisor_ApplyIntent(bot)`
+- `CCSBot::Update()` (before the state machine dispatch) → `Advisor_ApplyIntent(bot)`
 - `Bot_RegisterCVars()` → `Advisor_RegisterCVars()`
 
-## 3. Rodar
+## 3. Running
 
 ```bash
-scripts/build-regamedll.sh      # compila e instala o cs.so no servidor
-scripts/run-botbrain.sh         # sidecar + servidor (dust2)
+scripts/build-regamedll.sh      # compiles and installs cs.so into the server
+scripts/run-botbrain.sh         # sidecar + server (dust2)
 ```
 
-ou separadamente: `tools/botbrain/run.sh` contra um servidor já no ar.
+or separately: `tools/botbrain/run.sh` against a server already up.
 
-**No VR não precisa de nada disso:** `scripts/run-cs-vr.sh` sobe o servidor de
-bots sozinho, espera a porta abrir, entra na partida em VR e derruba tudo na
-saída (`CS_BOTS=0` desliga; `CS_BOT_PORT` muda a porta; se já houver servidor na
-porta ele só conecta, e um `+connect` seu faz ele nem subir servidor local).
+**In VR none of this is needed:** `scripts/run-cs-vr.sh` brings up the bot server
+by itself, waits for the port to open, joins the match in VR and tears everything
+down on exit (`CS_BOTS=0` turns it off; `CS_BOT_PORT` changes the port; if a
+server is already on that port it just connects, and a `+connect` of yours makes
+it not even start a local server).
 
-Credenciais: `~/Workspace/jev-ultrafast/.env` (`TYPESAFE_API_KEY`,
-`TYPESAFE_MODEL`). Nada é copiado nem modificado no clone do jev.
+Credentials: `~/Workspace/jev-ultrafast/.env` (`TYPESAFE_API_KEY`,
+`TYPESAFE_MODEL`). Nothing is copied or modified in the jev clone.
 
-## 4. Protocolo (arquivos `key=value`)
+## 4. Protocol (`key=value` files)
 
-`cstrike/advisor/observe_<t|ct>.txt` (a DLL escreve, atômico via tmp+rename):
+`cstrike/advisor/observe_<t|ct>.txt` (the DLL writes it, atomic via tmp+rename):
 
 ```
 v=1  ts=412.50  team=T  round=7  phase=freeze   # freeze | live | postplant
@@ -87,58 +88,59 @@ bomb_zone=none   # A | B | none
 history=RUSH_B,STACK_A
 ```
 
-`cstrike/advisor/plan_<t|ct>.txt` (o sidecar escreve):
+`cstrike/advisor/plan_<t|ct>.txt` (the sidecar writes it):
 
 ```
 v=1  seq=91915040  round=7  intent=RUSH_B  source=jev   # jev | cache
 ```
 
-A DLL só aplica se `round` for a rodada atual **e** `seq` for maior que o
-último consumido — um plano velho nunca é reaplicado.
+The DLL only applies it if `round` is the current round **and** `seq` is greater
+than the last consumed one — an old plan is never re-applied.
 
-## 5. Conjunto fechado de intents (V1, de_dust2/defuse)
+## 5. Closed set of intents (V1, de_dust2/defuse)
 
-| Time | Intents |
+| Team | Intents |
 |---|---|
 | T | `RUSH_B`, `RUSH_A_LONG`, `RUSH_A_SHORT`, `SPLIT_A`, `HOLD_AFTER_PLANT`, `ECO_SAVE`, `DEFAULT` |
 | CT | `STACK_A`, `STACK_B`, `RETAKE_A`, `RETAKE_B`, `ECO_SAVE`, `DEFAULT` |
 
-Mapeamento (em `cs_bot_advisor.cpp`), usando só o que o mapa dá:
+Mapping (in `cs_bot_advisor.cpp`), using only what the map provides:
 
-- `RUSH_*` / `RETAKE_*` → `MoveTo(posição aleatória na zona do site)` +
+- `RUSH_*` / `RETAKE_*` → `MoveTo(random position in the site zone)` +
   `SetTask(SEEK_AND_DESTROY)` + `SetDisposition(ENGAGE_AND_INVESTIGATE)`.
-- `STACK_*` / `HOLD_AFTER_PLANT` → `Hide(posição na zona)` +
+- `STACK_*` / `HOLD_AFTER_PLANT` → `Hide(position in the zone)` +
   `SetTask(GUARD_BOMB_ZONE)` + `SetDisposition(OPPORTUNITY_FIRE)`.
 - `ECO_SAVE` → `SetDisposition(SELF_DEFENSE)`.
-- `DEFAULT` → **não sobrescreve nada** (o CCSBot joga sozinho).
+- `DEFAULT` → **overrides nothing** (CCSBot plays on its own).
 
-Não há coordenada de dust2 escrita no código: os alvos saem de
-`TheCSBots()->GetZone(i)->m_center` e `GetRandomPositionInZone()`. Qual índice
-de zona é o site A ou B vem do **`target` do `func_bomb_target`**
-(`tgt_a`/`tgt_b`) — o dust2 nomeia por `target`, não `targetname`.
+There is no dust2 coordinate hard-coded: the targets come from
+`TheCSBots()->GetZone(i)->m_center` and `GetRandomPositionInZone()`. Which zone
+index is site A or B comes from the **`func_bomb_target`'s `target`**
+(`tgt_a`/`tgt_b`) — dust2 names by `target`, not `targetname`.
 
-A intent é aplicada **uma vez por mudança** (a DLL guarda o que já aplicou por
-bot); depois disso o CCSBot retoma o controle, inclusive o combate.
+The intent is applied **once per change** (the DLL remembers what it already
+applied per bot); after that CCSBot takes back control, including combat.
 
-## 6. O lado do coach (economia e gatilho)
+## 6. The coach side (economy and trigger)
 
-- **`buy_status`** é calculado no Python, não pedido ao modelo: `<1200` = `eco`,
-  `<4000` = `force`, senão `full`. Conhecimento de economia do CS 1.6 fica no
-  código, não no prompt.
-- **A assinatura é o gatilho**: ela só muda em início de rodada, mudança de
-  fase, bomba plantada, time reduzido a clutch (≤2 vivos), virada de placar,
-  faixa de economia e último plano. Ou seja, decisões acontecem em **momentos
-  significativos**, não a cada morte.
-- **Cache** por assinatura: situações repetidas custam zero. Medido em jogo:
-  ~400 decisões → ~15–25 chamadas ao modelo.
-- **`--min-call-interval`** (2 s por time) evita rajadas.
-- **Sem fallback no erro**: se o modelo falhar, nenhum plano é escrito e a DLL
-  mantém o que tinha (no início da rodada, o comportamento stock).
+- **`buy_status`** is computed in Python, not asked of the model: `<1200` = `eco`,
+  `<4000` = `force`, otherwise `full`. CS 1.6 economy knowledge stays in the
+  code, not in the prompt.
+- **The signature is the trigger**: it only changes on round start, phase
+  change, bomb planted, team reduced to clutch (≤2 alive), score flip, economy
+  band and last plan. In other words, decisions happen at **significant
+  moments**, not on every death.
+- **Cache** by signature: repeated situations cost zero. Measured in game:
+  ~400 decisions → ~15–25 model calls.
+- **`--min-call-interval`** (2 s per team) avoids bursts.
+- **No fallback on error**: if the model fails, no plan is written and the DLL
+  keeps what it had (at round start, the stock behavior).
 
-### Quanto custa (medido)
+### What it costs (measured)
 
-O trace grava o `usage` que o TypeSafe devolve, o daemon fecha cada sessão com um
-resumo, e `tools/botbrain/run.sh --report [DESDE]` imprime o gasto:
+The trace records the `usage` that TypeSafe returns, the daemon closes each
+session with a summary, and `tools/botbrain/run.sh --report [SINCE]` prints the
+spend:
 
 ```
 chamadas ao Jev: 14  (cache: 145)
@@ -146,65 +148,66 @@ tokens:          11193 entrada · 1101 saída
 custo (entrada): US$ 0.000470
 ```
 
-Medido: **~800 tokens de entrada e ~80 de saída por chamada**. O TypeSafe publica
-**US$ 42 por bilhão de tokens de entrada** (≈ US$ 0,042 por milhão) — ou seja, uma
-partida de minutos custa **menos de um centésimo de dólar**. O preço de **saída
-não é publicado**, então o relatório dá um piso de entrada; o número oficial está
-no console do TypeSafe.
+(Jev calls: 14 (cache: 145) · tokens: 11193 input · 1101 output · cost (input): US$ 0.000470)
 
-## 7. Pré-requisitos do servidor (aprendidos na prática)
+Measured: **~800 input tokens and ~80 output tokens per call**. TypeSafe publishes
+**US$ 42 per billion input tokens** (≈ US$ 0.042 per million) — that is, a match
+of a few minutes costs **less than one cent of a dollar**. The **output price is
+not published**, so the report gives an input floor; the official number is in
+the TypeSafe console.
 
-1. **`bot_enable 1` no `server/cstrike/game_init.cfg`.** Em servidor dedicado
-   os bots são gated por `bot_enable`, e o ReGameDLL executa `game_init.cfg`
-   **antes** de `Bot_RegisterCVars()` — é a única janela em que dá para setar o
-   cvar. Sem isso, nenhum comando `bot_*` existe (o `game_init.cfg` estava
-   vazio).
-2. **`bot_join_after_player 0`.** Com o default (`1`), sem humano conectado o
-   quota desejado é 0 e o servidor **expulsa** os bots ("kicked to maintain
-   quota"). Obrigatório para partidas headless.
-3. **`BotProfile.db` + `BotChatter.db` no `server/cstrike/`.**
+## 7. Server prerequisites (learned in practice)
+
+1. **`bot_enable 1` in `server/cstrike/game_init.cfg`.** On a dedicated server
+   the bots are gated by `bot_enable`, and ReGameDLL runs `game_init.cfg`
+   **before** `Bot_RegisterCVars()` — it is the only window in which the cvar can
+   be set. Without it, no `bot_*` command exists (the `game_init.cfg` was empty).
+2. **`bot_join_after_player 0`.** With the default (`1`), with no human connected
+   the desired quota is 0 and the server **kicks** the bots ("kicked to maintain
+   quota"). Required for headless matches.
+3. **`BotProfile.db` + `BotChatter.db` in `server/cstrike/`.**
    (`src/cs16-client/3rdparty/cs16client-extras/`).
-4. **`server/cstrike/maps/de_dust2.nav`.** Não existe pronto no repo: o nav-mesh
-   é gerado pelo próprio bot. Com o mapa carregado e um bot vivo, rode
-   `bot_nav_analyze` e depois de ~90 s `bot_nav_save` (o arquivo tem ~420 KB e
-   passa a carregar sozinho).
-5. **`exec advisor.cfg` no `server.cfg`.** `+exec` na linha de comando não
-   serve: roda antes de o game DLL registrar os cvars `bot_*`.
+4. **`server/cstrike/maps/de_dust2.nav`.** It does not exist ready-made in the
+   repo: the nav-mesh is generated by the bot itself. With the map loaded and a
+   bot alive, run `bot_nav_analyze` and after ~90 s `bot_nav_save` (the file is
+   ~420 KB and from then on loads by itself).
+5. **`exec advisor.cfg` in `server.cfg`.** `+exec` on the command line does not
+   work: it runs before the game DLL registers the `bot_*` cvars.
 
-## 8. Depurar
+## 8. Debugging
 
-Cvars do módulo: `advisor_enable` (0 = stock byte-a-byte), `advisor_debug`
-(1 = plano/rodada/aplicação; 2 = também o objetivo de cada bot),
-`advisor_force_intent <NOME>` (dirige a metade DLL sem o sidecar),
+Module cvars: `advisor_enable` (0 = stock byte-for-byte), `advisor_debug`
+(1 = plan/round/application; 2 = also each bot's goal),
+`advisor_force_intent <NAME>` (drives the DLL half without the sidecar),
 `advisor_poll_interval`, `advisor_heartbeat`.
 
 ```bash
-grep ADVISOR server/...            # ou o stdout do servidor
-cat tools/botbrain/traces/decisions.jsonl | tail   # cada decisão + contexto
-tools/botbrain/run.sh --report                     # quanto a sessão gastou
-tools/botbrain/run.sh --once --no-model --dir server/cstrike/advisor   # testa o mailbox sem gastar
+grep ADVISOR server/...            # or the server's stdout
+cat tools/botbrain/traces/decisions.jsonl | tail   # each decision + context
+tools/botbrain/run.sh --report                     # how much the session spent
+tools/botbrain/run.sh --once --no-model --dir server/cstrike/advisor   # tests the mailbox without spending
 ```
 
-O módulo também loga, no início de cada rodada com debug ligado, os centros de
-zona e o site (`ADVISOR: zone 0 (B) target='tgt_b' …`).
+The module also logs, at the start of each round with debug on, the zone centers
+and the site (`ADVISOR: zone 0 (B) target='tgt_b' …`).
 
-## 9. O que ficou provado na V1
+## 9. What V1 proved
 
-- Bots jogam dust2 de verdade (nav gerado, 4v4, plantam e defusam).
-- `RUSH_B` → bomba plantada no **site B**; `RUSH_A_LONG` → **site A**
-  (contagem por amostragem de `bomb_zone`).
-- Laço completo em jogo: observe → Jev → plan → aplicado nos bots
+- Bots actually play dust2 (nav generated, 4v4, they plant and defuse).
+- `RUSH_B` → bomb planted on **site B**; `RUSH_A_LONG` → **site A**
+  (count by sampling `bomb_zone`).
+- Full loop in game: observe → Jev → plan → applied to the bots
   (`ADVISOR: team CT <- RETAKE_B`, `applied RETAKE_B` ×…).
-- Sensibilidade da decisão (observações forjadas): full/even → `RUSH_B`;
-  eco/losing → `ECO_SAVE`; postplant em B → `HOLD_AFTER_PLANT`; postplant em A
-  (CT) → `RETAKE_A`; **inimigo repetindo B → `STACK_A`**.
-- Custo: ~25 chamadas ao modelo em ~2 min de partida (o resto vem do cache).
+- Decision sensitivity (forged observations): full/even → `RUSH_B`;
+  eco/losing → `ECO_SAVE`; postplant on B → `HOLD_AFTER_PLANT`; postplant on A
+  (CT) → `RETAKE_A`; **enemy repeating B → `STACK_A`**.
+- Cost: ~25 model calls in ~2 min of match (the rest comes from cache).
 
-## 10. Limites da V1 (deliberados)
+## 10. V1 limits (deliberate)
 
-- Só `de_dust2`; só o cenário defuse.
-- Uma decisão por **time** por momento — não há Jev por bot.
-- Sem política aprendida/destilação, sem chatter gerado, sem micro-gestão de
-  compra, sem transporte por socket, sem UI.
-- A variedade de intents depende da economia da partida: com times pobres, o
-  Jev tende a `ECO_SAVE` — o que é correto, mas faz o lado pobre atacar menos.
+- `de_dust2` only; defuse scenario only.
+- One decision per **team** per moment — there is no per-bot Jev.
+- No learned policy/distillation, no generated chatter, no buy
+  micro-management, no socket transport, no UI.
+- The variety of intents depends on the match economy: with poor teams, Jev
+  tends to `ECO_SAVE` — which is correct, but it makes the poor side attack less.

@@ -1,203 +1,231 @@
-# Mãos e arma de verdade (viewmodel próprio da VR) — `vr_hands`
+# Real hands and weapon (VR's own viewmodel) — `vr_hands`
 
-O viewmodel de 1999 do CS **deixa de aparecer na classe `pistol`** e no lugar entram os
-braços do **WRAD ARMS** com skinning e uma pistola do **Quaternius**, que seguem as mãos:
-os dois braços fazem IK contra os controles, os dedos fecham no cabo, a arma pode ir para
-o **coldre da barriga** ou para o **chão**, e dá para segurá-la com **as duas mãos**.
+CS's 1999 viewmodel **stops appearing in the `pistol` class** and in its place come the
+**WRAD ARMS** arms with skinning and a **Quaternius** pistol, which follow the hands:
+both arms do IK against the controllers, the fingers close on the grip, the weapon can go
+to the **belly holster** or to the **ground**, and you can hold it with **both hands**.
 
-Vale só onde há VR: no jogo flat (monitor) o viewmodel continua o de sempre, intacto.
+It only applies where there is VR: in the flat game (monitor) the viewmodel stays the usual
+one, intact.
 
 ---
 
-## O que a ABI do Mod permite (e o que não permite)
+## What the Mod ABI allows (and what it does not)
 
-A ABI (v8, `engine/common/mod_api.h`) entrega ao Mod: `Printf`, `DoubleTime`,
-`engine_version` (`:69-75`) e nada mais. **Não há** carregador de modelo/textura, canal de
-comando, entidade nem física. O que existe e é usado aqui:
+The ABI (v8, `engine/common/mod_api.h`) gives the Mod: `Printf`, `DoubleTime`,
+`engine_version` (`:69-75`) and nothing more. There is **no** model/texture loader, command
+channel, entity or physics. What exists and is used here:
 
-| Peça | Onde | Para que serve |
+| Piece | Where | What it is for |
 |---|---|---|
-| `mod_viewmodel_t.hide` | `mod_api.h:178` | o jogo para de desenhar a arma dele |
-| `mod_input_sample_t` | `mod_api.h:119` | mira absoluta + `MOD_BTN_*` (é o gate do gatilho) |
-| `mod_view_t.fov_asym` | `mod_api.h:91` | frustum assimétrico do olho — **em radianos** |
-| FBO do olho com `GL_DEPTH_COMPONENT24` | `mod_vr.cpp:2187` | o mundo oclui os braços de graça |
-| `vr_eye_cam[e]` | `mod_vr.cpp:755` | origem/ângulos/fov/tamanho por olho |
-| `in_hand_g[]` / `in_hand_pose[]` | `mod_vr.cpp:940` | posição e pose dos controles |
+| `mod_viewmodel_t.hide` | `mod_api.h:178` | the game stops drawing its own weapon |
+| `mod_input_sample_t` | `mod_api.h:119` | absolute aim + `MOD_BTN_*` (it is the trigger gate) |
+| `mod_view_t.fov_asym` | `mod_api.h:91` | asymmetric eye frustum — **in radians** |
+| Eye FBO with `GL_DEPTH_COMPONENT24` | `mod_vr.cpp:2187` | the world occludes the arms for free |
+| `vr_eye_cam[e]` | `mod_vr.cpp:755` | origin/angles/fov/size per eye |
+| `in_hand_g[]` / `in_hand_pose[]` | `mod_vr.cpp:940` | position and pose of the controllers |
 
-Consequências que moldaram o desenho:
+Consequences that shaped the design:
 
-- **A arma do servidor é a arma do CS.** Este subsistema é a camada visual e de intenção:
-  ele decide o que se vê, para onde se mira e se o gatilho vale. Ele **não** troca, saca ou
-  descarta arma no inventário — a ABI não tem canal para isso.
-- **Não há raycast**, então o "chão" da arma largada é o chão do próprio jogador
-  (`player_origin.z − altura dos olhos`), que já acompanha escada/caixa.
-- **A origem do projétil continua no olho**: a ABI não deixa mover a origem do tiro, só a
-  direção (`viewangles_abs`). Mira pelo cano, saída pelo olho.
+- **The server weapon is the CS weapon.** This subsystem is the visual and intention layer:
+  it decides what is seen, where aim points and whether the trigger counts. It does **not**
+  switch, draw or discard weapons in the inventory — the ABI has no channel for that.
+- **There is no raycast**, so the "ground" of the dropped weapon is the player's own ground
+  (`player_origin.z − eye height`), which already follows stairs/boxes.
+- **The projectile origin stays at the eye**: the ABI does not let the shot origin be moved,
+  only the direction (`viewangles_abs`). Barrel aim, eye exit.
 
 ---
 
-## Arquivos
+## Files
 
-| Arquivo | Papel |
+| File | Role |
 |---|---|
-| `mods/vr/vr_hands.h` | interface: `update` (1x/frame) / `draw` (por olho) / `sheet` |
-| `mods/vr/vr_hands.cpp` | o subsistema: carga, encaixe, IK, dedos, estados, desenho, folhas |
-| `mods/vr/vr_hands.cfg` | calibração (hot-reload: **salvar já aplica**) |
-| `mods/vr/assets/` | `arms.glb` + `Pistol_1.obj/.mtl` (CC0; ver `assets/SOURCES.md`) |
-| `mods/vr/tools/glb_inspect.py` | relatório do rig (ossos, skin, bbox) |
-| `mods/vr/tools/skin_probe.cpp` | prova o skinning fora do GL |
-| `mods/vr/tools/ppm2png.py` | converte o dump PPM do mod em PNG (só stdlib) |
+| `mods/vr/vr_hands.h` | interface: `update` (1x/frame) / `draw` (per eye) / `sheet` |
+| `mods/vr/vr_hands.cpp` | the subsystem: load, fit, IK, fingers, states, drawing, sheets |
+| `mods/vr/vr_hands.cfg` | calibration (hot-reload: **saving applies it**) |
+| `mods/vr/assets/` | `arms.glb` + `Pistol_1.obj/.mtl` (CC0; see `assets/SOURCES.md`) |
+| `mods/vr/tools/glb_inspect.py` | rig report (bones, skin, bbox) |
+| `mods/vr/tools/skin_probe.cpp` | proves the skinning outside GL |
+| `mods/vr/tools/ppm2png.py` | converts the mod's PPM dump to PNG (stdlib only) |
 
-## Fluxo por frame
+## Per-frame flow
 
 ```
-VR_FramePre ──► vr_hands_frame()          [1x por frame, DEPOIS do xrSyncActions]
-                 ├─ vr_hands_body_fill()  corpo: olho + roomscale, yaw do tronco, chão
-                 └─ vr_hands_update()     estado da arma, IK, dedos, encaixe, skin
-VR_Input    ◄── vr_hands_state             mira do CANO + gate do MOD_BTN_ATTACK
-VR_ViewModel ──► vr_hands_covers_model()   vm->hide = 1 (só na classe coberta e só em VR)
-VR_AfterEyes ──► vr_hands_draw(cam)        por olho: só desenha a pose já resolvida
+VR_FramePre ──► vr_hands_frame()          [1x per frame, AFTER xrSyncActions]
+                 ├─ vr_hands_body_fill()  body: eye + roomscale, torso yaw, ground
+                 └─ vr_hands_update()     weapon state, IK, fingers, fit, skin
+VR_Input    ◄── vr_hands_state             BARREL aim + gate of MOD_BTN_ATTACK
+VR_ViewModel ──► vr_hands_covers_model()   vm->hide = 1 (only on the covered class and only in VR)
+VR_AfterEyes ──► vr_hands_draw(cam)        per eye: only draws the pose already resolved
 ```
 
-O `update` roda **uma vez por frame** (não por olho): os dois olhos trocam a matriz e a
-arma/braço ficam idênticos nos dois — senão a estereoscopia do que está na mão sai errada.
-No modo de teste (sem headset) o `update` é chamado do `VR_AfterEyes`, porque fora de
-sessão não existe `FramePre` de VR.
+The `update` runs **once per frame** (not per eye): the two eyes swap the matrix and the
+weapon/arm stay identical in both — otherwise the stereoscopy of what is in the hand comes
+out wrong. In test mode (without headset) the `update` is called from `VR_AfterEyes`,
+because outside a session there is no VR `FramePre`.
 
 ---
 
-## O encaixe é resolvido, não chutado
+## The fit is solved, not guessed
 
-Esta é a parte que mudou de verdade na V2. O que existia antes era um multiplicador mágico
-e um quaternion de osso — foi assim que a pistola ficou **de lado, para trás e 4,2× maior**.
+This is the part that really changed in V2. What existed before was a magic multiplier and
+a bone quaternion — that is how the pistol ended up **sideways, backwards and 4.2× bigger**.
 
-**1. Eixos do asset, declarados.** Cada arquivo tem a sua convenção (`arms_axes`,
-`weapon_axes` no cfg): `-Z +Y +X` = frente −Z, cima +Y, direita +X (glTF/WRAD);
-`+X +Y +Z` (OBJ/Quaternius, comprimento no +X). Aplicar a mesma conversão nos dois punha a
-pistola atravessada.
+**1. Asset axes, declared.** Each file has its own convention (`arms_axes`, `weapon_axes`
+in the cfg): `-Z +Y +X` = forward −Z, up +Y, right +X (glTF/WRAD); `+X +Y +Z`
+(OBJ/Quaternius, length on +X). Applying the same conversion to both put the pistol
+crosswise.
 
-**2. Referencial da MÃO.** A arma é montada no referencial da mão (frente = cano, esquerda,
-cima), derivado do próprio rig no load (ver `assets/SOURCES.md`): a palma sai da média das
-bases dos dedos, e a rotação da mão segue a **pose do controle** — sem isso o punho ficava
-na pose de repouso do rig e a arma não tinha como entrar na mão.
+**2. HAND frame.** The weapon is mounted in the hand frame (forward = barrel, left, up),
+derived from the rig itself at load (see `assets/SOURCES.md`): the palm comes from the
+average of the finger bases, and the hand rotation follows the **controller pose** —
+without this the fist stayed in the rig's rest pose and the weapon had no way to get into
+the hand.
 
-**3. Empunhadura ancorada na palma.** `weapon_grip` é um ponto **dentro do modelo** (medido:
-centroide do cabo da `Pistol_1`, `−0,10 −0,23 0`). Ele cai exatamente no centro da palma —
-o relatório imprime `empunhadura a 0.00 un da palma` quando isso está certo.
+**3. Grip anchored to the palm.** `weapon_grip` is a point **inside the model** (measured:
+centroid of the grip of the `Pistol_1`, `−0.10 −0.23 0`). It lands exactly on the palm
+centre — the report prints `empunhadura a 0.00 un da palma` (grip 0.00 u from the palm)
+when this is right.
 
-**4. Escala pelo comprimento REAL.** `weapon_length_cm` (19) ÷ o comprimento medido do
-modelo (1,82) = **4,11 un/un** → a pistola sai com **7,48 unidades GoldSrc = 19,0 cm**.
-Nenhum asset precisa de número mágico, e o bug da escala dobrada (o mundo do osso `socket`
-já carregava `scale_arms` e o multiplicador entrava por cima) morreu na raiz.
+**4. Scale by the REAL length.** `weapon_length_cm` (19) ÷ the measured length of the model
+(1.82) = **4.11 u/u** → the pistol comes out at **7.48 GoldSrc units = 19.0 cm**. No asset
+needs a magic number, and the doubled-scale bug (the world of the `socket` bone already
+carried `scale_arms` and the multiplier came on top) died at the root.
 
-**5. Resíduos com sentido.** Sobram dois ajustes de gosto, ambos **no referencial em que a
-arma é montada**: `weapon_off` (unidades GoldSrc: frente/esquerda/cima) e `weapon_euler`
-(graus: `pitch` = **boca para cima**, `yaw`, `roll`). O `holster_euler` usa a mesma
-convenção. Com os padrões, os dois ficam em zero e o encaixe já está certo.
+**5. Residuals that make sense.** Two taste adjustments remain, both **in the frame in which
+the weapon is mounted**: `weapon_off` (GoldSrc units: forward/left/up) and `weapon_euler`
+(degrees: `pitch` = **muzzle up**, `yaw`, `roll`). The `holster_euler` uses the same
+convention. With the defaults, both are zero and the fit is already right.
 
-**6. A mesma conta para os três lugares.** `mount_weapon()` monta a arma na mão, no coldre e
-no chão — só muda o referencial. Não há três cópias da matemática para divergirem.
+**6. The same math for all three places.** `mount_weapon()` mounts the weapon in the hand,
+in the holster and on the ground — only the frame changes. There are not three copies of the
+math to diverge.
 
-## Dedos que fecham
+## Fingers that close
 
-O rig tem **30 ossos de dedo** (`finger_{pinky,ring,middle,index,thumb}{1,2,3}.{l,r}`) e o
-eixo de flexão de cada falange é **derivado do repouso**, sem tabela por asset: no espaço
-local do osso o comprimento corre em `+Y`, então girar em torno de
-`cross(Y, direção-para-a-palma)` move a ponta do dedo **na direção da palma**. Vale igual
-para as duas mãos e para o polegar. O quanto fecha vem do cfg (`curl_max` por falange e um
-peso por dedo), e a mão que **segura** a arma soma um `curl_fist`: o punho fecha no cabo
-mesmo com o analógico em 0,6.
+The rig has **30 finger bones** (`finger_{pinky,ring,middle,index,thumb}{1,2,3}.{l,r}`) and
+the flexion axis of each phalanx is **derived from the rest pose**, with no per-asset table:
+in the bone's local space the length runs along `+Y`, so rotating around
+`cross(Y, direction-to-palm)` moves the fingertip **toward the palm**. It holds equally for
+both hands and for the thumb. How much it closes comes from the cfg (`curl_max` per phalanx
+and a weight per finger), and the hand that **holds** the weapon adds a `curl_fist`: the
+fist closes on the grip even with the analog at 0.6.
 
-## Estados: mão, coldre, chão e duas mãos
+## States: hand, holster, ground and two hands
 
 ```
-   NA MÃO ──── grip solto longe da barriga ───► NO CHÃO ──── grip perto ────► NA MÃO
-      │                                            ▲
-      └── grip solto com a mão na barriga ──► NO COLDRE ◄──── grip perto ────┘
+   IN HAND ──── grip released far from the belly ───► ON THE GROUND ──── grip near ────► IN HAND
+      │                                                  ▲
+      └── grip released with the hand on the belly ──► IN THE HOLSTER ◄──── grip near ────┘
 ```
 
-- **NA MÃO** é o estado inicial. A **mão de trás** (quem segura o cabo) é a que pegou; a
-  outra é apoio.
-- **Duas mãos** quando os dois grips estão apertados **e** a mão de apoio está dentro de
-  `two_hand_radius` da âncora de apoio. O cano passa a ser a direção
-  `mão_de_apoio → mão_de_trás` misturada com a frente da mão de trás (`two_hand_blend`), a
-  mão de trás gira **junto** com a arma, e o IK da mão de apoio mira a **arma** (a arma
-  conduz a mão, que é o padrão dos jogos).
-- **Soltar** só derruba a arma quando **ninguém** a segura: de duas mãos, largar a de trás
-  não a derruba.
-- **Pegar** é por borda do grip + raio (`grab_radius`), com histerese (`grab_hyst`); vale
-  com **qualquer** das mãos, e a arma troca de mão de trás.
-- **Chão**: a arma cai (gravidade real, `drop_gravity` = 9,8 m/s²) até o plano do chão do
-  jogador e deita (o cano fica horizontal).
-- **Coldre**: fica na barriga, boca para baixo (`holster_euler` = −70° → medido: o cano faz
-  **−0,94 com a vertical do corpo**). A âncora é do **corpo**: `player_origin` + roomscale,
-  com o yaw do tronco — que pode atrasar a cabeça (`VR_BODY_YAW_LAG`), senão olhar para o
-  lado gira o coldre junto.
+- **IN HAND** is the initial state. The **rear hand** (the one that holds the grip) is the
+  one that grabbed; the other is support.
+- **Two hands** when both grips are squeezed **and** the support hand is within
+  `two_hand_radius` of the support anchor. The barrel becomes the direction
+  `support hand → rear hand` blended with the forward of the rear hand (`two_hand_blend`),
+  the rear hand rotates **along** with the weapon, and the support hand's IK aims at the
+  **weapon** (the weapon drives the hand, which is the standard in games).
+- **Release** only drops the weapon when **nobody** is holding it: in two hands, letting go
+  of the rear one does not drop it.
+- **Grab** is by grip edge + radius (`grab_radius`), with hysteresis (`grab_hyst`); it works
+  with **either** hand, and the weapon switches rear hand.
+- **Ground**: the weapon falls (real gravity, `drop_gravity` = 9.8 m/s²) to the player's
+  ground plane and lies down (the barrel goes horizontal).
+- **Holster**: sits on the belly, muzzle down (`holster_euler` = −70° → measured: the barrel
+  makes **−0.94 with the body vertical**). The anchor belongs to the **body**: `player_origin`
+  + roomscale, with the torso yaw — which can lag the head (`VR_BODY_YAW_LAG`), otherwise
+  looking sideways turns the holster with it.
 
-## Integração com o jogo
+## Integration with the game
 
-- **Mira pelo cano** (`VR_AIM_FROM_WEAPON`, ligado): a direção da arma na mão é o que vai ao
-  servidor. É o que faz o grip de duas mãos e o saque com qualquer mão concordarem com o que
-  se vê. Desligar volta a mirar pela mão/cabeça (`VR_AIM_SOURCE`).
-- **Gate do gatilho** (`enforce_armed` no cfg, ligado): fora da mão o gatilho não atira — e
-  isso vale **só para a classe que este subsistema desenha**; com o rifle equipado, nada
-  muda. O recuo visual só dispara com a arma na mão.
-- **Recuo visual** no referencial da arma (para trás no cano + boca para cima), em unidades
-  GoldSrc do cfg. O recuo que desvia o tiro continua sendo o do jogo.
+- **Barrel aim** (`VR_AIM_FROM_WEAPON`, on): the direction of the weapon in the hand is what
+  goes to the server. It is what makes the two-handed grip and the draw with either hand
+  agree with what is seen. Turning it off goes back to aiming by the hand/head
+  (`VR_AIM_SOURCE`).
+- **Trigger gate** (`enforce_armed` in the cfg, on): outside the hand the trigger does not
+  fire — and this applies **only to the class this subsystem draws**; with the rifle
+  equipped, nothing changes. The visual recoil only fires with the weapon in the hand.
+- **Visual recoil** in the weapon's frame (backwards along the barrel + muzzle up), in
+  GoldSrc units from the cfg. The recoil that deflects the shot is still the game's.
 
 ---
 
-## Configuração (`mods/vr/vr_hands.cfg`)
+## Configuration (`mods/vr/vr_hands.cfg`)
 
-Salvar o arquivo **já aplica**: o mod relê por mtime (~1×/s) e recarrega os assets — dá para
-ajustar encaixe, escala, eixos e a folha de contato sem reiniciar o jogo.
+Saving the file **applies it**: the mod re-reads by mtime (~1×/s) and reloads the assets —
+you can adjust fit, scale, axes and the contact sheet without restarting the game.
 
-| Chave | Padrão | O que é |
+| Key | Default | What it is |
 |---|---|---|
-| `enable` | 1 | 0 = volta ao viewmodel do jogo |
-| `arms_glb` / `arms_tex` / `weapon_obj` | assets do WRAD/Quaternius | caminhos (relativos a `game/`) |
-| `arms_axes` / `weapon_axes` | `-Z +Y +X` / `+X +Y +Z` | convenção DENTRO de cada arquivo |
-| `scale_arms` | 4,2 | rig → unidades GoldSrc |
-| `weapon_length_cm` | 19 | comprimento real alvo (a escala sai daqui) |
-| `weapon_scale_res` | 1 | resíduo multiplicativo |
-| `weapon_grip` | −0,10 −0,23 0 | ponto de empunhadura no espaço do MODELO |
-| `weapon_off` / `weapon_euler` | 0 | resíduo: unidades GoldSrc / graus (pitch = boca p/ cima) |
-| `support_fwd` / `support_side` / `support_up` | 1,6 / 1,4 / 0 | onde a mão de apoio vai |
-| `curl_max` | 85 95 75 | flexão máxima por falange (graus) |
-| `curl_pinky`…`curl_thumb` | 1,0 1,0 0,95 0,85 0,6 | peso por dedo |
-| `curl_fist` | 0,75 | fechamento mínimo da mão que segura |
-| `grip_th` | 0,6 | squeeze que conta como "apertado" |
-| `holster_fwd/down/side` | 10 / 22 / 0 | coldre: à frente e abaixo do olho |
-| `holster_euler` | −70 0 0 | pose guardada (pitch negativo = boca para baixo) |
-| `holster_radius` / `grab_radius` / `grab_hyst` | 9 / 7 / 1,7 | guardar / pegar / histerese |
-| `two_hand_radius` / `two_hand_blend` | 6 / 0,5 | entrar nas duas mãos / peso do cano |
-| `drop_gravity` / `drop_eye_height` | 386 / 28 | queda e chão |
-| `recoil_deg` / `recoil_kick` / `recoil_interval` | 7 / 0,9 / 0,09 | recuo visual |
-| `enforce_armed` | 1 | fora da mão, o gatilho não atira |
-| `sheet` | 0 | folha de contato (ver abaixo) |
-| `synth_hands` / `synth_grip` / `synth_dist` / `synth_side` / `synth_down` | 0 / 1 / 24 / 5,5 / 9 | mãos sintéticas do diagnóstico |
-| `near` / `far` / `color_gamma` | 4 / 7086 / 2,2 | casar com o ref; o `Kd` do MTL é linear |
+| `enable` | 1 | 0 = back to the game's viewmodel |
+| `arms_glb` / `arms_tex` / `weapon_obj` | WRAD/Quaternius assets | paths (relative to `game/`) |
+| `arms_axes` / `weapon_axes` | `-Z +Y +X` / `+X +Y +Z` | convention INSIDE each file |
+| `scale_arms` | 4.2 | rig → GoldSrc units |
+| `weapon_length_cm` | 19 | target real length (the scale comes from here) |
+| `weapon_scale_res` | 1 | multiplicative residual |
+| `weapon_grip` | −0.10 −0.23 0 | grip point in MODEL space |
+| `weapon_off` / `weapon_euler` | 0 | residual: GoldSrc units / degrees (pitch = muzzle up) |
+| `support_fwd` / `support_side` / `support_up` | 1.6 / 1.4 / 0 | where the support hand goes |
+| `curl_max` | 85 95 75 | maximum flexion per phalanx (degrees) |
+| `curl_pinky`…`curl_thumb` | 1.0 1.0 0.95 0.85 0.6 | weight per finger |
+| `curl_fist` | 0.75 | minimum closure of the hand that holds |
+| `grip_th` | 0.6 | squeeze that counts as "squeezed" |
+| `holster_fwd/down/side` | 10 / 22 / 0 | holster: forward and below the eye |
+| `holster_euler` | −70 0 0 | stored pose (negative pitch = muzzle down) |
+| `holster_radius` / `grab_radius` / `grab_hyst` | 9 / 7 / 1.7 | store / grab / hysteresis |
+| `two_hand_radius` / `two_hand_blend` | 6 / 0.5 | entering two hands / barrel weight |
+| `drop_gravity` / `drop_eye_height` | 386 / 28 | fall and ground |
+| `recoil_deg` / `recoil_kick` / `recoil_interval` | 7 / 0.9 / 0.09 | visual recoil |
+| `enforce_armed` | 1 | outside the hand, the trigger does not fire |
+| `sheet` | 0 | contact sheet (see below) |
+| `synth_hands` / `synth_grip` / `synth_dist` / `synth_side` / `synth_down` | 0 / 1 / 24 / 5.5 / 9 | diagnostic synthetic hands |
+| `near` / `far` / `color_gamma` | 4 / 7086 / 2.2 | match the ref; the MTL's `Kd` is linear |
 
-## Diagnóstico sem headset: as folhas de contato
+## Diagnosis without a headset: the contact sheets
 
-`VR_HANDS_TEST=1` (ou qualquer `VR_HANDS_SHEET`) desenha no **FBO da janela**, e o
-`VR_PANEL_DUMP` salva o quadro. A folha é uma **grade de vistas do MESMO caminho de
-desenho** — o que se vê é o que o jogo desenha. As vistas são **relativas ao corpo** (yaw do
-tronco): `0` = de frente para o jogador, `90` = do lado esquerdo, `180` = por trás.
+`VR_HANDS_TEST=1` (or any `VR_HANDS_SHEET`) draws into the **window FBO**, and
+`VR_PANEL_DUMP` saves the frame. The sheet is a **grid of views of the SAME drawing path** —
+what you see is what the game draws. The views are **relative to the body** (torso yaw):
+`0` = facing the player, `90` = from the left side, `180` = from behind.
 
-| `VR_HANDS_SHEET` | Grade | Para decidir |
+| `VR_HANDS_SHEET` | Grid | To decide |
 |---|---|---|
-| `fit` | 4×3 ângulos em volta da mão | encaixe, orientação e TAMANHO da arma na mão |
-| `weapon` | 4×3, a arma sozinha + marcadores | se a empunhadura está no cabo e o eixo no cano |
-| `curl` | 4 níveis de grip × 2 mãos | direção e quantidade do fechamento dos dedos |
-| `states` | 2×2 | as quatro poses: na mão, duas mãos, coldre, chão |
-| `walk` | 4×2 | **roteiro pela máquina de estados** (pegar/guardar/largar/2 mãos) |
+| `fit` | 4×3 angles around the hand | fit, orientation and SIZE of the weapon in the hand |
+| `weapon` | 4×3, the weapon alone + markers | whether the grip point is on the grip and the axis on the barrel |
+| `curl` | 4 grip levels × 2 hands | direction and amount of the finger closing |
+| `states` | 2×2 | the four poses: in hand, two hands, holster, ground |
+| `walk` | 4×2 | **script through the state machine** (grab/store/release/2 hands) |
 
-No modo `weapon` os marcadores são linhas: **vermelho** = eixo do cano, **verde** = lado,
-**azul** = cima da arma, **branco** = comprimento (na escala real). Eles provam as âncoras.
+In `weapon` mode the markers are lines: **red** = barrel axis, **green** = side,
+**blue** = weapon up, **white** = length (at real scale). They prove the anchors.
 
-O mesmo desenho imprime um **relatório numérico** no log — é o que permite decidir sem olhar
-a imagem:
+<p align="center">
+  <img src="img/fit-anchors.png" alt="The weapon alone from 9 angles: the grip anchor cross sits in the grip, the white line runs from grip to muzzle" width="80%">
+</p>
+
+<p align="center"><em>The <code>weapon</code> sheet, which is what the fit is judged on: red/green/blue
+is the mount frame, white is the grip&rarr;muzzle line at real scale, and the anchor sits in the grip
+instead of beside it. This render is what caught two of the bugs in the list at the end of this
+document.</em></p>
+
+<p align="center">
+  <img src="img/hand-curl.png" alt="Two rows, four columns each: the hand closing from open to a fist gripping the pistol, then the empty hand closing from open to a fist" width="80%">
+</p>
+
+<p align="center"><em>The <code>curl</code> sheet: grip at 0 / ⅓ / ⅔ / 1, with the weapon (top) and empty
+(bottom). The closing direction is derived, not authored — it comes out correct for both hands and for
+the thumb because the axis is computed from the rig's own rest pose.</em></p>
+
+**Honest caveat about the sheets that show the arms.** In test mode there are no controllers: the
+hands sit at the synthetic positions from the cfg (`synth_dist/side/down`), so the **arms are
+stretched and look wrong** in the `fit`, `states` and `walk` sheets. That is an artifact of the
+fixture, not of the arms — with controllers in hand the IK targets are where your hands actually
+are. Use those sheets for the weapon's fit, size and position; do not judge the arms by them.
+
+The same drawing prints a **numeric report** in the log — it is what allows deciding without
+looking at the image:
 
 ```
 maos: folha 'fit' 4x3 | escala 4.11 un/un | comprimento real 19.0 cm | estado na mao
@@ -205,7 +233,7 @@ maos: encaixe: cano x frente-da-mao = 0.0 graus | empunhadura a 0.00 un da palma
 maos: coldre: cano x cima-do-corpo = -0.94 (cfg pitch -70) | cano x frente = +0.34
 ```
 
-E o modo `walk` roda a máquina de estados de verdade, passo a passo:
+And `walk` mode runs the state machine for real, step by step:
 
 ```
 maos: passo 0: grip esq 0.00 dir 1.00 -> na mao | mao de tras dir
@@ -217,7 +245,7 @@ maos: passo 6: grip esq 0.00 dir 0.00 -> no coldre | mao de tras esq   (levou à
 maos: passo 7: grip esq 0.00 dir 1.00 -> na mao | mao de tras dir      (sacou de novo)
 ```
 
-Receita (do `game/`, que é o cwd do xash3d — precisa de X11):
+Recipe (from `game/`, which is xash3d's cwd — needs X11):
 
 ```sh
 cd game
@@ -226,76 +254,77 @@ VR_HANDS_SHEET=fit VR_DEBUG_PANEL=0 VR_PANEL_DUMP=/tmp/fit.ppm VR_PANEL_DUMP_AT=
 python3 ../mods/vr/tools/ppm2png.py /tmp/fit.ppm /tmp/fit.png
 ```
 
-Outras variáveis úteis: `VR_HANDS_FAKE_MODEL=models/v_usp.mdl` (injeta o nome do viewmodel
-sem arma equipada), `VR_AIM_FROM_WEAPON=0`, `VR_BODY_YAW_LAG=0.25`, `VR_WEAPON_DEBUG=1`.
+Other useful variables: `VR_HANDS_FAKE_MODEL=models/v_usp.mdl` (injects the viewmodel name
+without an equipped weapon), `VR_AIM_FROM_WEAPON=0`, `VR_BODY_YAW_LAG=0.25`,
+`VR_WEAPON_DEBUG=1`.
 
-## Verificado sem headset
+## Verified without a headset
 
-| O que | Como | Resultado |
+| What | How | Result |
 |---|---|---|
-| Carga dos assets | log do load | 1196 tri / 872 verts / 50 ossos + 1040 tri da arma |
-| Referencial da palma | log do load | 0,37 un. do rig do punho, normal para o corpo nas duas mãos |
-| Encaixe na mão | folha `fit` + relatório | cano a **0,0°** da frente da mão; empunhadura a **0,00 un** da palma |
-| Tamanho | folha `fit` + relatório | **7,48 un = 19,0 cm** (era ~32 un) |
-| Âncoras | folha `weapon` | cruz no cabo, linha branca ao longo do cano |
-| Dedos | folha `curl` | fecha na direção da palma, nos 4 níveis, **nas duas mãos** |
-| Coldre | relatório + folha `states` | cano a **−0,94** da vertical do corpo (boca para baixo) |
-| Estados | folha `walk` + log | **8/8** passos: pegar (esq), 2 mãos, soltar a de trás, guardar, sacar (dir) |
-| Flat não regrediu | jogo sem `VR_HANDS_TEST` | nenhuma linha do subsistema no log; mod carrega normal |
+| Asset loading | load log | 1196 tri / 872 verts / 50 bones + 1040 tri for the weapon |
+| Palm frame | load log | 0.37 u from the fist rig, normal to the body in both hands |
+| Fit in the hand | `fit` sheet + report | barrel at **0.0°** from the hand forward; grip at **0.00 u** from the palm |
+| Size | `fit` sheet + report | **7.48 u = 19.0 cm** (was ~32 u) |
+| Anchors | `weapon` sheet | cross on the grip, white line along the barrel |
+| Fingers | `curl` sheet | close toward the palm, at all 4 levels, **in both hands** |
+| Holster | report + `states` sheet | barrel at **−0.94** from the body vertical (muzzle down) |
+| States | `walk` sheet + log | **8/8** steps: grab (left), 2 hands, release the rear one, store, draw (right) |
+| Flat did not regress | game without `VR_HANDS_TEST` | no line from the subsystem in the log; mod loads normally |
 
-### Falta validar com o headset (seu lado)
+### Still to validate with the headset (your side)
 
-1. Tamanho e orientação da pistola na mão (é o `weapon_length_cm` e o `weapon_euler`).
-2. Fechar a mão com o grip (`curl_fist` é o mínimo quando ela segura a arma).
-3. Sacar do coldre e guardar (o coldre está 10 un à frente e 22 abaixo do olho).
-4. Duas mãos: se o encaixe da mão de apoio precisar de ajuste, é `support_fwd/side/up`.
-5. Pegar do chão e trocar de mão.
-6. A mira pelo cano: se preferir a de antes, `VR_AIM_FROM_WEAPON=0`.
-7. Se o coldre incomodar ao olhar para o lado, ligue `VR_BODY_YAW_LAG=0.25`.
+1. Size and orientation of the pistol in the hand (it is `weapon_length_cm` and the `weapon_euler`).
+2. Closing the hand with the grip (`curl_fist` is the minimum when it holds the weapon).
+3. Draw from the holster and store (the holster is 10 u forward and 22 below the eye).
+4. Two hands: if the fit of the support hand needs adjustment, it is `support_fwd/side/up`.
+5. Grab from the ground and switch hands.
+6. Barrel aim: if you prefer the previous one, `VR_AIM_FROM_WEAPON=0`.
+7. If the holster bothers you when looking sideways, turn on `VR_BODY_YAW_LAG=0.25`.
 
-## Limites desta versão
+## Limits of this version
 
-- Só a classe **`pistol`** (usp, glock18, p228, deagle, elite, fiveseven) e um único par
-  braços+arma. As outras classes seguem exatamente como antes.
-- **Sem recarga, sem gesto de pino de granada, sem haptics e sem som.** O pedido era mirar e
-  atirar por movimento — e é o que está aqui.
-- **O inventário é do jogo.** Guardar/largar é estado do cliente (o que se vê e se o gatilho
-  vale); a arma equipada no servidor não muda. A arma largada também não sobrevive a troca
-  de mapa e não tem colisão com o mundo.
-- A **origem** do projétil continua no olho (a ABI não deixa movê-la) — só a direção vem do
-  cano.
-- O punho gira como um corpo rígido (a rotação do controle entra no osso do punho): não há
-  torção de antebraço.
-- Skinning na **CPU** em modo imediato: ~2.200 tri, 1×/frame. Se um dia pesar, o caminho é
-  arrays de vértice, sem mudar o resto.
+- Only the **`pistol`** class (usp, glock18, p228, deagle, elite, fiveseven) and a single
+  arms+weapon pair. The other classes stay exactly as before.
+- **No reload, no grenade-pin gesture, no haptics and no sound.** The request was to aim and
+  fire by motion — and that is what is here.
+- **The inventory belongs to the game.** Store/release is client state (what is seen and
+  whether the trigger counts); the weapon equipped on the server does not change. The
+  dropped weapon also does not survive a map change and has no collision with the world.
+- The projectile **origin** stays at the eye (the ABI does not let it be moved) — only the
+  direction comes from the barrel.
+- The fist rotates as a rigid body (the controller rotation goes into the wrist bone): there
+  is no forearm twist.
+- Skinning on the **CPU** in immediate mode: ~2,200 tri, 1×/frame. If it ever becomes heavy,
+  the path is vertex arrays, without changing the rest.
 
-## Notas de engenharia (bugs que custaram tempo)
+## Engineering notes (bugs that cost time)
 
-1. **`fov_asym` é em RADIANOS** (a ABI entrega assim e o `proj_matrix` aplica `tan()`).
-   Guardar a tangente aplicava o `tan` duas vezes e achatava o modelo.
-2. **A inversa tem de ser geral, não "rígida".** As matrizes de mundo do rig carregam a
-   escala (`scale_arms`); a inversa que assume rotação ortonormal gerava locais com
-   translação de centenas de unidades e a malha explodia.
-3. **O skin já está em espaço de mundo.** O `cur[root]` inclui a colocação do rig, então o
-   desenho dos braços entra com a matriz **identidade** — aplicar a colocação de novo
-   jogava os braços para longe (a arma, que não tem skin, continuava certa).
-4. **Modo imediato com *client arrays* ligados é descartado.** O `ref_gl` desenha o mundo
-   com vertex arrays; desligar tudo antes do `glBegin` evita vértices descartados.
-5. **"No VR não apareceu nada" — o gate escondia e o gate desenhava discordavam.** O bloco
-   que grava o nome do viewmodel (`vr_wpn_model`) ficava *depois* do `return` que esconde o
-   viewmodel do jogo: o jogo escondia a arma dele e o `VR_AfterEyes`, que consultava
-   `vr_wpn_model` (ainda `"-"`), nunca desenhava. Hoje existe **uma decisão só**
-   (`vr_hands_draw_ours`), tomada antes de qualquer `return`.
-6. **A coluna 0 de uma matriz column-major é `(m[0] m[1] m[2])`.** Usar a linha 0
-   (`m[0] m[4] m[8]`) fazia o diagnóstico acusar **86° de erro** num encaixe que estava
-   certo — custou uma folha de contato inteira de investigação.
-7. **O resíduo gira no LOCAL do referencial em que a arma é montada.** Antes ele usava o
-   vetor de mundo do referencial: com o corpo virado para +X dava certo e fora disso o
-   coldre de −70° saía com **≈16°** (a pistola praticamente deitada na barriga).
-8. **A média dos dedos divide por QUANTOS dedos foram somados.** Dividir por 3 com 4 dedos
-   somados inflava a "frente da palma" em 4/3 e jogava o encaixe para fora do lugar.
-9. **O `test_nodepth` do diagnóstico vazava para o jogo** (sem profundidade a arma
-   atravessava parede em VR); hoje o modo de teste é explícito (`vr_hands_set_test_mode` foi
-   substituído por um modo de folha explícito).
-10. **No modo de teste o `update` não rodava**: ele estava só dentro do bloco de sessão do
-    `VR_FramePre`, que não existe sem headset. A folha de contato ficava em branco.
+1. **`fov_asym` is in RADIANS** (the ABI delivers it that way and `proj_matrix` applies
+   `tan()`). Storing the tangent applied `tan` twice and flattened the model.
+2. **The inverse has to be general, not "rigid".** The rig's world matrices carry the scale
+   (`scale_arms`); the inverse that assumes an orthonormal rotation generated locals with
+   translations of hundreds of units and the mesh exploded.
+3. **The skin is already in world space.** The `cur[root]` includes the rig placement, so the
+   arms drawing enters with the **identity** matrix — applying the placement again threw the
+   arms far away (the weapon, which has no skin, stayed right).
+4. **Immediate mode with *client arrays* enabled is discarded.** `ref_gl` draws the world
+   with vertex arrays; disabling everything before `glBegin` avoids discarded vertices.
+5. **"Nothing appeared in VR" — the hiding gate and the drawing gate disagreed.** The block
+   that writes the viewmodel name (`vr_wpn_model`) was *after* the `return` that hides the
+   game's viewmodel: the game hid its weapon and `VR_AfterEyes`, which queried
+   `vr_wpn_model` (still `"-"`), never drew. Today there is **a single decision**
+   (`vr_hands_draw_ours`), made before any `return`.
+6. **Column 0 of a column-major matrix is `(m[0] m[1] m[2])`.** Using row 0
+   (`m[0] m[4] m[8]`) made the diagnostic report **86° of error** on a fit that was right —
+   it cost a whole contact sheet of investigation.
+7. **The residual rotates in the LOCAL space of the frame in which the weapon is mounted.**
+   Before, it used the frame's world vector: with the body turned to +X it worked and outside
+   that the −70° holster came out at **≈16°** (the pistol practically lying on the belly).
+8. **The finger average divides by HOW MANY fingers were summed.** Dividing by 3 with 4
+   fingers summed inflated the "palm forward" by 4/3 and threw the fit out of place.
+9. **The `test_nodepth` of the diagnostic leaked into the game** (without depth the weapon
+   went through walls in VR); today the test mode is explicit (`vr_hands_set_test_mode` was
+   replaced by an explicit sheet mode).
+10. **In test mode the `update` did not run**: it was only inside the `VR_FramePre` session
+    block, which does not exist without a headset. The contact sheet stayed blank.

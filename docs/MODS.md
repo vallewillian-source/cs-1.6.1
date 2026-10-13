@@ -1,424 +1,425 @@
-# MODS.md — Arquitetura de Mods do CS 1.6 open-source
+# MODS.md — CS 1.6.1 Mod Architecture
 
 > **Status: ABI v8 (2026-10-12).**
-> v1 (Fase 1) congelada; **v2** acrescentou, no FIM das structs: `mod_view_t.viewport[4]`,
-> `Mod_EyeCount()` e `Mod_AfterEyes()` (estéreo — passes de render por frame e hook
-> pré-2D). **v3** acrescentou `Mod_Overlay2D()`: o último ponto de desenho do frame
-> (HUD, menus, console e placar prontos; swap ainda não feito), usado pelo painel de
-> debug da tela 2D do `mod_vr`. **v4** acrescentou `mod_view_t.fov_asym[4]`/`has_fov_asym`
-> + a flag `RF_FOV_ASYM` no `ref_viewpass_t`: frustum **fora de centro por olho** — o
-> que a ótica canted do headset exige (ver §"Frustum por olho" abaixo). **v5** (Fase 3)
-> fez o `MOD_CAP_INPUT` sair da inércia: `mod_input_sample_t` ganhou `move_up`,
-> `viewangles_abs[3]` e `has_viewangles_abs`, e o engine passou a **APLICAR** a amostra
-> no `usercmd` (ver §"Input" abaixo). **v6** acrescentou `Mod_ViewModel` +
-> `mod_viewmodel_t`: o Mod leva a **arma para a mão** (sobrescreve origem/ângulos do
-> viewmodel) e escolhe o depth — `RF_VIEWMODEL_WORLD` (a arma passa a ser **ocluída
-> pelo mundo**) e `RF_NO_VIEWMODEL` (esconder; para um Mod que desenhe a própria
-> arma) — ver §"Arma na mão" abaixo. **v7** acrescentou `Mod_Key` + `MOD_CAP_KEYS`:
-> o Mod vê o evento de teclado **antes de todo handler do engine** (OSK, console,
-> menu, binds e cliente DLL) e pode **consumi-lo** — é o que permite uma UI de
-> calibração por teclado (o ajuste fino do IPD do `mod_vr` usa isso) sem a tecla
-> vazar para o jogo. **v8** trocou os dois stubs nunca fiados do `MOD_CAP_HUD`
-> (`Mod_HudRedirect`/`Mod_HudPointer`) por **um intercâmbio por frame** —
-> `Mod_Hud( mod_hud_t* )`: o engine entrega os **fatos** (menu aberto, tamanho do
-> espaço 2D, textura do canvas) e o Mod decide a **política** (quer o 2D num canvas
-> offscreen? onde está o cursor do menu e quando clicar?). Junto vieram o **canvas
-> 2D** no ref, o **cursor virtual** que os dois consumidores de cursor do engine
-> leem, e o `R_InvalidateTextures` (ver §"Menus no headset"). Fonte da
-> verdade: `src/xash3d-fwgs/engine/common/mod_api.h` (branch `vr-mod`). Loader:
+> v1 (Phase 1) frozen; **v2** added, at the END of the structs: `mod_view_t.viewport[4]`,
+> `Mod_EyeCount()` and `Mod_AfterEyes()` (stereo — render passes per frame and pre-2D
+> hook). **v3** added `Mod_Overlay2D()`: the last drawing point of the frame
+> (HUD, menus, console and scoreboard ready; swap not yet done), used by the 2D
+> screen debug panel of `mod_vr`. **v4** added `mod_view_t.fov_asym[4]`/`has_fov_asym`
+> + the `RF_FOV_ASYM` flag in `ref_viewpass_t`: frustum **off-center per eye** — what
+> the headset's canted optics require (see §"Per-eye frustum" below). **v5** (Phase 3)
+> made `MOD_CAP_INPUT` leave inertia: `mod_input_sample_t` gained `move_up`,
+> `viewangles_abs[3]` and `has_viewangles_abs`, and the engine started to **APPLY** the sample
+> in the `usercmd` (see §"Input" below). **v6** added `Mod_ViewModel` +
+> `mod_viewmodel_t`: the Mod takes the **weapon in hand** (overrides origin/angles of the
+> viewmodel) and chooses the depth — `RF_VIEWMODEL_WORLD` (the weapon becomes **occluded
+> by the world**) and `RF_NO_VIEWMODEL` (hide; for a Mod that draws its own
+> weapon) — see §"Weapon in hand" below. **v7** added `Mod_Key` + `MOD_CAP_KEYS`:
+> the Mod sees the keyboard event **before every engine handler** (OSK, console,
+> menu, binds and client DLL) and can **consume it** — it is what enables a keyboard
+> calibration UI (the IPD fine-tuning of `mod_vr` uses it) without the key
+> leaking into the game. **v8** replaced the two never-wired stubs of `MOD_CAP_HUD`
+> (`Mod_HudRedirect`/`Mod_HudPointer`) with **a per-frame exchange** —
+> `Mod_Hud( mod_hud_t* )`: the engine delivers the **facts** (menu open, size of the
+> 2D space, canvas texture) and the Mod decides the **policy** (does it want the 2D on an offscreen
+> canvas? where is the menu cursor and when to click?). Along with it came the **2D canvas**
+> in the ref, the **virtual cursor** that both engine cursor consumers
+> read, and `R_InvalidateTextures` (see §"Menus in the headset"). Source of
+> truth: `src/xash3d-fwgs/engine/common/mod_api.h` (branch `vr-mod`). Loader:
 > `src/xash3d-fwgs/engine/common/modloader.c`. Mods:
-> `mods/null/` (template) e `mods/vr/` (OpenXR — o primeiro Mod real).
+> `mods/null/` (template) and `mods/vr/` (OpenXR — the first real Mod).
 >
-> **Mod antigo não carrega em engine novo (e vice-versa):** o loader exige
-> `api_version == MOD_API_VERSION` exato — como a struct cresceu, um mod compilado
-> contra a v3 leria campos deslocados. Ao subir a ABI, recompile `mods/*` (o
-> `mods/null` é o primeiro a acusar).
+> **An old mod does not load in a new engine (and vice-versa):** the loader requires
+> `api_version == MOD_API_VERSION` exactly — since the struct grew, a mod compiled
+> against v3 would read shifted fields. When bumping the ABI, recompile `mods/*` (the
+> `mods/null` is the first to complain).
 >
-> Gotcha de build C++: `ModGetAPI` precisa de `extern "C"` (mangling), e a linkagem do
-> mod precisa do fonte ANTES das `-l` (Ubuntu usa `--as-needed` por padrão).
+> C++ build gotcha: `ModGetAPI` needs `extern "C"` (mangling), and the mod linking
+> needs the source BEFORE the `-l` (Ubuntu uses `--as-needed` by default).
 
-## 1. O que é um "Mod" aqui
+## 1. What a "Mod" is here
 
-Um **Mod** é uma biblioteca compartilhada (`mod_<nome>.so`) que o engine
-(Xash3D FWGS, branch `vr-mod`) carrega em tempo de execução e que estende o
-jogo através de **hooks** em pontos de extensão definidos.
+A **Mod** is a shared library (`mod_<name>.so`) that the engine
+(Xash3D FWGS, branch `vr-mod`) loads at runtime and that extends the
+game through **hooks** at defined extension points.
 
-Não é um "game dir" do GoldSrc/Xash (`-game cstrike` continua existindo e
-continua sendo a fonte de conteúdo). Um Mod **não duplica conteúdo** — ele é
-código. O primeiro Mod é o **`vr`** (realidade virtual via OpenXR).
+It is not a GoldSrc/Xash "game dir" (`-game cstrike` still exists and
+remains the source of content). A Mod **does not duplicate content** — it is
+code. The first Mod is **`vr`** (virtual reality via OpenXR).
 
-## 2. Decisões de arquitetura (registradas em 2026-10-11, Fase 0)
+## 2. Architecture decisions (recorded on 2026-10-11, Phase 0)
 
-| # | Decisão | Justificativa |
+| # | Decision | Rationale |
 |---|---------|---------------|
-| 1 | **C ABI, struct versionada**, um único símbolo exportado (`ModGetAPI`) | estabilidade binária: engine e Mod compilam separadamente, até com compiladores diferentes; campos novos no fim + `api_version` = compatibilidade nos dois sentidos |
-| 2 | **Carregamento via `dlopen`**, acionado por `-mod <nome>` (engine procura `mod_<nome>.so`) | zero custo quando desligado; múltiplos Mods possíveis no futuro sem colisão; unload limpo no shutdown |
-| 3 | **Capabilities declaradas** (bitmask: `display`, `input`, `hud`) | o engine pergunta, o Mod responde: só são chamados os hooks do que o Mod declara; permite conviver Mods de naturezas diferentes |
-| 4 | **Hook não registrado = comportamento padrão do engine** | fallback total: sem `-mod`, o jogo é byte-a-byte o atual |
-| 5 | **O engine nunca conhece OpenXR** (nem qualquer tecnologia de Mod específica) | o conhecimento de VR vive 100% no `mod_vr.so`; o engine só conhece o contrato genérico |
-| 6 | **VR é client-side** — servidor (ReHLDS/ReGameDLL), protocolo e conteúdo intocados | cliente VR e cliente flat jogam no mesmo servidor, indistinguíveis |
+| 1 | **C ABI, versioned struct**, a single exported symbol (`ModGetAPI`) | binary stability: engine and Mod compile separately, even with different compilers; new fields at the end + `api_version` = compatibility in both directions |
+| 2 | **Loading via `dlopen`**, driven by `-mod <name>` (engine looks for `mod_<name>.so`) | zero cost when off; multiple Mods possible in the future without collision; clean unload on shutdown |
+| 3 | **Declared capabilities** (bitmask: `display`, `input`, `hud`) | the engine asks, the Mod answers: only the hooks of what the Mod declares are called; allows Mods of different natures to coexist |
+| 4 | **Hook not registered = default engine behavior** | total fallback: without `-mod`, the game is byte-for-byte the current one |
+| 5 | **The engine never knows OpenXR** (nor any Mod-specific technology) | all VR knowledge lives 100% in `mod_vr.so`; the engine only knows the generic contract |
+| 6 | **VR is client-side** — server (ReHLDS/ReGameDLL), protocol and content untouched | VR client and flat client play on the same server, indistinguishable |
 
-## 3. Contrato v1 (congelado — ver `engine/common/mod_api.h`)
+## 3. Contract v1 (frozen — see `engine/common/mod_api.h`)
 
-A struct completa está no header (fonte da verdade). Resumo do que o Mod implementa/expõe:
+The complete struct is in the header (source of truth). Summary of what the Mod implements/exposes:
 
-- **Exportação obrigatória**: `mod_api_t *ModGetAPI( void )` — único símbolo exigido.
-- **Identidade**: `api_version` (tem que ser exatamente `MOD_API_VERSION`), `mod_name`, `capabilities` (`MOD_CAP_DISPLAY`, `MOD_CAP_INPUT`, `MOD_CAP_HUD`, `MOD_CAP_KEYS`).
-- **Lifecycle**: `Mod_Init( mod_engine_api_t* )` (recebe `Printf`, `DoubleTime`, `engine_version`; retorno 0 recusa o load) e `Mod_Shutdown()`.
-- **Frame** (sempre chamados): `Mod_FramePre( time )` / `Mod_FramePost( time )`.
-- **`MOD_CAP_DISPLAY`**: `Mod_Camera( mod_view_t* )` — por view pass, pode sobrescrever origem/ângulos/FOV (projeção externa fica para a fase 2); `Mod_BeginFrame( mod_gl_ctx_t* )` (janela + contexto GL do engine); `Mod_EndFrame()`.
-- **`MOD_CAP_INPUT`**: `Mod_Input( mod_input_sample_t* )` — 1x/frame. **No v1 o engine entrega a amostra e não aplica o conteúdo** (aplicação real, pela rota do teclado/mouse com prediction, chega na Fase 3 com o mod_vr).
-- **`MOD_CAP_HUD`**: `Mod_Hud( mod_hud_t* )` (v8 — fatos do engine + decisões do Mod por frame; ver §"Menus no headset"), `Mod_HudRedirect`/`Mod_HudPointer` (os stubs sem fiamento da v1 **saíram** na v8) e, na v3, `Mod_Overlay2D()`.
-- **`MOD_CAP_KEYS`** (v7): `Mod_Key( key, down )` — evento de teclado antes de todo handler; retorno 1 = consumido (ver §"Teclado" abaixo).
+- **Mandatory export**: `mod_api_t *ModGetAPI( void )` — the only required symbol.
+- **Identity**: `api_version` (must be exactly `MOD_API_VERSION`), `mod_name`, `capabilities` (`MOD_CAP_DISPLAY`, `MOD_CAP_INPUT`, `MOD_CAP_HUD`, `MOD_CAP_KEYS`).
+- **Lifecycle**: `Mod_Init( mod_engine_api_t* )` (receives `Printf`, `DoubleTime`, `engine_version`; return 0 refuses the load) and `Mod_Shutdown()`.
+- **Frame** (always called): `Mod_FramePre( time )` / `Mod_FramePost( time )`.
+- **`MOD_CAP_DISPLAY`**: `Mod_Camera( mod_view_t* )` — per view pass, can override origin/angles/FOV (external projection is left for phase 2); `Mod_BeginFrame( mod_gl_ctx_t* )` (window + engine GL context); `Mod_EndFrame()`.
+- **`MOD_CAP_INPUT`**: `Mod_Input( mod_input_sample_t* )` — 1x/frame. **In v1 the engine delivers the sample and does not apply the contents** (real application, via the keyboard/mouse route with prediction, arrives in Phase 3 with mod_vr).
+- **`MOD_CAP_HUD`**: `Mod_Hud( mod_hud_t* )` (v8 — engine facts + Mod decisions per frame; see §"Menus in the headset"), `Mod_HudRedirect`/`Mod_HudPointer` (the never-wired stubs of v1 **left** in v8) and, in v3, `Mod_Overlay2D()`.
+- **`MOD_CAP_KEYS`** (v7): `Mod_Key( key, down )` — keyboard event before every handler; return 1 = consumed (see §"Keyboard" below).
 
 ### `Mod_Overlay2D()` (v3, `MOD_CAP_HUD`)
 
-Último ponto de desenho do frame: é chamado no fim do `V_PostRender`, **depois** de
-HUD, menus, console, placar e do `SCR_MakeScreenShot`, e **antes** do `R_EndFrame`
-(que apresenta o render target e faz o swap). Consequências práticas:
+Last drawing point of the frame: it is called at the end of `V_PostRender`, **after**
+HUD, menus, console, scoreboard and `SCR_MakeScreenShot`, and **before** `R_EndFrame`
+(which presents the render target and does the swap). Practical consequences:
 
-- o que o Mod desenha aqui fica **por cima** de toda a UI do jogo;
-- o alvo é o framebuffer 2D da janela; no VR os olhos vivem em outras swapchains
-  (submetidas ao runtime no `Mod_EndFrame`), então um overlay aqui **não vai para o
-  headset** — só para o monitor;
-- não entra em screenshots do jogo (o `SCR_MakeScreenShot` roda antes).
+- what the Mod draws here is **on top** of all the game UI;
+- the target is the window's 2D framebuffer; in VR the eyes live in other swapchains
+  (submitted to the runtime in `Mod_EndFrame`), so an overlay here **does not go to the
+  headset** — only to the monitor;
+- it does not enter game screenshots (`SCR_MakeScreenShot` runs before).
 
-Use `glGetIntegerv( GL_VIEWPORT )` para saber o espaço de coordenadas: o
-`R_Set2DMode` já fixou o viewport no alvo 2D, então o overlay fica correto com ou sem
-o render target interno do `ref_gl` (ver `r_scene_scale`/`r_msaa`).
+Use `glGetIntegerv( GL_VIEWPORT )` to know the coordinate space: the
+`R_Set2DMode` has already fixed the viewport in the 2D target, so the overlay is
+correct with or without the internal render target of `ref_gl` (see
+`r_scene_scale`/`r_msaa`).
 
-**Armadilha do alvo (2026-10-12):** com o VR ativo o **binding herdado não é a
-janela** — o frame termina com o FBO da imagem do **último olho** ligado (o blit do
-espelho salva e devolve o binding que achou). Quem desenha 2D sem dizer onde
-desenha acaba escrevendo **dentro da imagem que vai para o headset**. Foi assim que
-o painel de debug e o HUD do jogo apareceram no HMD e não no monitor. Duas
-correções:
+**Target trap (2026-10-12):** with VR active the **inherited binding is not the
+window** — the frame ends with the FBO of the **last eye** image bound (the mirror
+blit saves and restores the binding it found). Whoever draws 2D without saying where
+they draw ends up writing **inside the image that goes to the headset**. That is how
+the debug panel and the game HUD appeared on the HMD and not on the monitor. Two
+fixes:
 
-- `ref/gl/gl_fbo.c` (`GL_BindScreenTarget`, chamado por `R_Set2DMode(true)`): sem
-  render target interno o 2D desenha **na janela**, e agora isso é dito
-  explicitamente (`glBindFramebuffer( GL_FRAMEBUFFER, 0 )`) em vez de confiar no
-  binding herdado;
-- o `mod_vr` também **liga a janela por conta própria** antes de pintar o painel
-  (e devolve o binding depois), para não depender do engine nem da ordem dos
-  hooks.
+- `ref/gl/gl_fbo.c` (`GL_BindScreenTarget`, called by `R_Set2DMode(true)`): without an
+  internal render target the 2D draws **on the window**, and now this is said
+  explicitly (`glBindFramebuffer( GL_FRAMEBUFFER, 0 )`) instead of trusting the
+  inherited binding;
+- `mod_vr` also **binds the window on its own** before painting the panel
+  (and restores the binding afterwards), to depend neither on the engine nor on the
+  hook order.
 
-Regra para qualquer Mod: antes de desenhar em 2D, **binde o alvo explicitamente**
-(`GL_DRAW_FRAMEBUFFER_BINDING`, e salve/restaure se não for dono do frame).
+Rule for any Mod: before drawing in 2D, **bind the target explicitly**
+(`GL_DRAW_FRAMEBUFFER_BINDING`, and save/restore if you don't own the frame).
 
-Quem consome hoje: o **painel de debug da tela 2D** do `mod_vr` (FPS + erros/avisos do
-carregamento do VR; `VR_DEBUG_PANEL`, `VR_PANEL_DUMP` — detalhes no cabeçalho de
+Consumers today: the **2D screen debug panel** of `mod_vr` (FPS + VR loading
+errors/warnings; `VR_DEBUG_PANEL`, `VR_PANEL_DUMP` — details in the header of
 `mods/vr/mod_vr.cpp`).
 
 ### `mod_view_t.fov_asym[4]` / `has_fov_asym` (v4, `MOD_CAP_DISPLAY`)
 
-`fov_x`/`fov_y` **só expressam frustum centralizado**: o renderer monta
-`xMax = zNear·tan(fov_x/2)`, `xMin = -xMax` (idem vertical). Headset de ótica
-**canted** não entrega isso — o runtime declara, por olho, quatro ângulos
-independentes e espelhados. Medido no Quest 3 via WiVRn:
+`fov_x`/`fov_y` **can only express a centered frustum**: the renderer builds
+`xMax = zNear·tan(fov_x/2)`, `xMin = -xMax` (same vertically). A headset with
+**canted** optics does not deliver that — the runtime declares, per eye, four
+independent and mirrored angles. Measured on the Quest 3 via WiVRn:
 
 ```
-olho esquerdo:  L 54,0°  R 40,0°  U 44,0°  D 55,0°
-olho direito:   L 40,0°  R 54,0°  U 44,0°  D 55°
+left eye:  L 54.0°  R 40.0°  U 44.0°  D 55.0°
+right eye: L 40.0°  R 54.0°  U 44.0°  D 55.0°
 ```
 
-São 94° horizontais e 99° verticais **fora de centro** (assimetria de ±14° na
-horizontal e 11° na vertical, com sinal trocado entre os olhos). Desenhar um
-frustum centrado de 54°×55° e submeter o assimétrico faz o compositor esticar a
-imagem de cada olho por um fator diferente — o sintoma clássico é "cada olho
-sozinho parece bom, os dois juntos não fundem".
+They are 94° horizontal and 99° vertical **off-center** (an asymmetry of ±14° on the
+horizontal and 11° on the vertical, with the sign swapped between the eyes). Drawing a
+centered 54°×55° frustum and submitting the asymmetric one makes the compositor stretch
+each eye's image by a different factor — the classic symptom is "each eye alone looks
+good, the two together don't fuse".
 
-Com `has_fov_asym = 1` o Mod entrega os quatro ângulos em **radianos e no sinal do
-OpenXR** (`angleLeft`/`angleDown` negativos) e o `ref_gl` monta a projeção
-off-center em `R_SetupProjectionMatrix` (`ref/gl/gl_rmain.c`); a flag
-`RF_FOV_ASYM` viaja no `ref_viewpass_t` (`common/ref_params.h`).
+With `has_fov_asym = 1` the Mod delivers the four angles in **radians and in the
+OpenXR sign** (`angleLeft`/`angleDown` negative) and `ref_gl` builds the off-center
+projection in `R_SetupProjectionMatrix` (`ref/gl/gl_rmain.c`); the flag
+`RF_FOV_ASYM` travels in the `ref_viewpass_t` (`common/ref_params.h`).
 
-**O culling também usa os quatro ângulos** (`GL_FrustumInitProjAsym`, chamada em
-`R_SetupFrustum` quando a flag está setada): antes ele era montado de
-`fov_x`/`fov_y`, que só descrevem um retângulo centrado — e um frustum
-assimétrico só se deixa cobrir por um envelope, que sobra no lado largo e **falta
-no estreito**. O que falta não é submetido a desenho: a geometria que vive só em
-cima daquela faixa (paredes distantes, o céu, água, partículas) desaparece da
-imagem, e o que aparece no lugar é o que estava atrás — o mapa "renderiza
-diferente" na periferia. Como `R_CullSurface` só descarta superfície cuja **caixa
-inteira** cai fora, superfícies grandes que atravessam o centro continuam sendo
-desenhadas por inteiro: era isso que fazia o defeito parecer "90% certo".
+**The culling also uses the four angles** (`GL_FrustumInitProjAsym`, called in
+`R_SetupFrustum` when the flag is set): before, it was built from
+`fov_x`/`fov_y`, which only describe a centered rectangle — and an asymmetric
+frustum can only be covered by an envelope, which is too wide on the wide side and
+**too narrow on the narrow side**. What is missing is not submitted for drawing:
+geometry that lives only over that strip (distant walls, the sky, water, particles)
+disappears from the image, and what appears in its place is what was behind — the map
+"renders differently" at the periphery. Since `R_CullSurface` only discards a surface
+whose **entire box** falls outside, large surfaces crossing the center continue being
+drawn in full: that is what made the defect look "90% right".
 
-`fov_x`/`fov_y` seguem obrigatórios, mas atenção à **unidade**: são aberturas
-**totais** em graus (o engine divide por dois internamente — `tan(fov_x/2)` na
-projeção, `SinCos(fov*0,5)` no frustum antigo). Publicar um meio-ângulo ali vale
-como se fosse o dobro e encolhe o culling à metade da abertura — foi exatamente o
-bug que este caminho assimétrico veio resolver; com ele, o valor de `fov_x`/`fov_y`
-deixou de importar para o culling (mas mantenha-o correto: `right − left` e
-`up − down` para qualquer outro consumidor).
+`fov_x`/`fov_y` remain mandatory, but watch the **unit**: they are **total** apertures
+in degrees (the engine divides by two internally — `tan(fov_x/2)` in the
+projection, `SinCos(fov*0,5)` in the old frustum). Publishing a half-angle there counts
+as if it were double and shrinks the culling to half the aperture — it was exactly the
+bug this asymmetric path came to fix; with it, the value of `fov_x`/`fov_y`
+stopped mattering for culling (but keep it correct: `right − left` and
+`up − down` for any other consumer).
 
-### Input: `mod_input_sample_t` aplicado ao `usercmd` (v5, `MOD_CAP_INPUT`)
+### Input: `mod_input_sample_t` applied to the `usercmd` (v5, `MOD_CAP_INPUT`)
 
-Na v1 o hook existia mas era inerte: `Mods_Input` entregava o struct zerado e
-**descartava** a resposta (comentário antigo em `modloader.c`). A v5 fechou o
-caminho, em duas metades:
+In v1 the hook existed but was inert: `Mods_Input` delivered the zeroed struct and
+**discarded** the response (old comment in `modloader.c`). v5 closed the path, in two
+halves:
 
-1. **Poll** — `Mods_Input()` continua sendo chamado 1x/frame em `Host_Frame`
-   (`host.c`, logo depois de `Host_InputFrame`) e agora **guarda** a amostra;
-   `Mods_GetInput( &sample )` a entrega a quem for aplicar.
-2. **Aplicação** — `IN_ModAppendMove( cmd, active )` (`engine/client/input/input.c`)
-   é chamada no `CL_CreateCmd` (`cl_main.c`), **imediatamente depois** do
-   `CL_CreateMove` do cliente e da `IN_EngineAppendMove`, e antes do
+1. **Poll** — `Mods_Input()` is still called 1x/frame in `Host_Frame`
+   (`host.c`, right after `Host_InputFrame`) and now **stores** the sample;
+   `Mods_GetInput( &sample )` delivers it to whoever applies it.
+2. **Application** — `IN_ModAppendMove( cmd, active )` (`engine/client/input/input.c`)
+   is called in `CL_CreateCmd` (`cl_main.c`), **immediately after** the
+   client's `CL_CreateMove` and `IN_EngineAppendMove`, and before
    `CL_PredictMovement`.
 
-Por que **depois** do client DLL: é o DLL quem lê mouse/teclado e escreve
-ângulos e `cmd->buttons` (por atribuição, não OR). Aplicar depois faz o Mod
-**vencer o mouse** sem desligá-lo — o mouse continua navegando menus, porque
-tanto a `IN_EngineAppendMove` quanto a `IN_ModAppendMove` cortam em
-`cls.key_dest != key_game`. E como o `CL_PredictMovement` vem em seguida, o que
-o Mod escreve é o que vai no `usercmd` **enviado ao servidor** e na predição.
+Why **after** the client DLL: it is the DLL that reads mouse/keyboard and writes
+angles and `cmd->buttons` (by assignment, not OR). Applying afterwards makes the Mod
+**beat the mouse** without turning it off — the mouse keeps navigating menus, because
+both `IN_EngineAppendMove` and `IN_ModAppendMove` cut at
+`cls.key_dest != key_game`. And since `CL_PredictMovement` comes next, what
+the Mod writes is what goes in the `usercmd` **sent to the server** and in the prediction.
 
-Campos que a v5 acrescentou (no fim do struct, como sempre):
+Fields v5 added (at the end of the struct, as always):
 
-| Campo | Para que |
+| Field | What for |
 |---|---|
-| `move_up` | eixo vertical → `cmd->upmove` (no chão o pmove zera `wishvel[2]`, então só vale onde o jogo já usa: água, espectador) |
-| `viewangles_abs[3]` | orientação **absoluta** (pitch, yaw, roll) |
-| `has_viewangles_abs` | `1` = usar o absoluto; `0` = vale o `viewangles_delta` do v1 |
+| `move_up` | vertical axis → `cmd->upmove` (on the ground pmove zeroes `wishvel[2]`, so it only counts where the game already uses it: water, spectator) |
+| `viewangles_abs[3]` | **absolute** orientation (pitch, yaw, roll) |
+| `has_viewangles_abs` | `1` = use the absolute; `0` = the `viewangles_delta` of v1 counts |
 
-**Absoluto, não delta.** A pose do HMD já é uma orientação absoluta; com delta o
-Mod brigaria com o mouse e com o `CL_AdjustAngles` do cliente. Absoluto também é
-o que torna o "movimento orientado pela cabeça" gratuito: o Mod injeta o yaw do
-HMD e manda o stick **cru** em `forwardmove`/`sidemove` — o `pm_shared` monta o
-`wishdir` com `AngleVectors(cmd.viewangles)` e ignora o pitch no chão, logo
-"olhar para cima" não muda a velocidade e "virar a cabeça" muda a direção de
-andar. Nenhuma matemática de direção no Mod.
+**Absolute, not delta.** The HMD pose already is an absolute orientation; with delta the
+Mod would fight the mouse and the client's `CL_AdjustAngles`. Absolute is also
+what makes "head-oriented movement" free: the Mod injects the HMD yaw and sends the stick
+**raw** in `forwardmove`/`sidemove` — `pm_shared` builds the
+`wishdir` with `AngleVectors(cmd.viewangles)` and ignores pitch on the ground, so
+"looking up" does not change the speed and "turning the head" changes the walking
+direction. No direction math in the Mod.
 
-Regras de aplicação (em `IN_ModAppendMove`):
+Application rules (in `IN_ModAppendMove`):
 
-- Ângulos: copiados para `cmd->viewangles` **e** para `cl.viewangles` (igual à
-  `IN_EngineAppendMove`, para predição e view model acompanharem). Pitch é
-  travado em ±89 como no `CL_CreateMove` do cliente — o render pode olhar mais
-  longe (`Mod_Camera` usa a pose crua), mas o que vai ao servidor fica dentro do
-  que o jogo aceita.
-- Movimento: só é **assumido** quando o stick saiu da deadzone (`valor != 0`).
-  Com o stick centrado o que veio do teclado permanece — teclado segue como
-  fallback em qualquer eixo.
-- `MOD_BTN_WALK` aplica `cl_movespeedkey` (mesmo fator do `+speed` do CS).
-- Botões → bits de `usercmd` do protocolo GoldSrc, que **já existem** em
+- Angles: copied to `cmd->viewangles` **and** to `cl.viewangles` (same as
+  `IN_EngineAppendMove`, for prediction and the view model to follow). Pitch is
+  clamped to ±89 as in the client's `CL_CreateMove` — the render may look further
+  (`Mod_Camera` uses the raw pose), but what goes to the server stays within
+  what the game accepts.
+- Movement: only **taken over** when the stick left the deadzone (`value != 0`).
+  With the stick centered what came from the keyboard remains — the keyboard stays as
+  a fallback on any axis.
+- `MOD_BTN_WALK` applies `cl_movespeedkey` (same factor as CS's `+speed`).
+- Buttons → GoldSrc protocol `usercmd` bits, which **already exist** in
   `common/const.h`: `MOD_BTN_ATTACK→IN_ATTACK`, `ATTACK2→IN_ATTACK2`,
   `JUMP→IN_JUMP`, `USE→IN_USE`, `RELOAD→IN_RELOAD`, `CROUCH→IN_DUCK`,
-  `SCORE→IN_SCORE`. `MOD_BTN_MENU` não tem bit equivalente — quem trata é o Mod.
-- O gate do gatilho é do Mod: com a arma fora da mão (coldre/chão) o `MOD_BTN_ATTACK`
-  **não é marcado** — é assim que "soltar a arma" tem consequência sem a ABI ter canal
-  de inventário. Ver `docs/HANDS.md`.
+  `SCORE→IN_SCORE`. `MOD_BTN_MENU` has no equivalent bit — the Mod handles it.
+- The trigger gate is the Mod's: with the weapon out of hand (holster/ground) `MOD_BTN_ATTACK`
+  **is not marked** — that is how "dropping the weapon" has a consequence without the ABI having a
+  channel of inventory. See `docs/HANDS.md`.
 
-### Grip por mão: ações do Mod, não da ABI (2026-10-13)
-O squeeze estava ligado a **uma** ação com os dois `squeeze/value` (`left` **e** `right`) e
-`countSubactionPaths = 0`: o runtime devolvia um valor só, misturado, e era impossível saber
-*qual* mão apertou — sem isso não há pegar/soltar por mão nem grip de duas mãos. Hoje são
-**duas ações** (`grip_left`, `grip_right`, `FLOAT`, com `subactionPath` da sua mão, via
-`vr_make_action_sub`), e o `MOD_BTN_WALK` continua saindo do **maior** dos dois, como antes.
-É o mesmo padrão já usado nas ações de pose (`aim_left`/`aim_right`). Os caminhos das mãos
-passaram a ser resolvidos **antes** da criação das ações, porque agora elas precisam deles.
+### Per-hand grip: Mod actions, not the ABI's (2026-10-13)
+The squeeze was bound to **one** action with both `squeeze/value` (`left` **and** `right`) and
+`countSubactionPaths = 0`: the runtime returned a single, mixed value, and it was impossible to know
+*which* hand squeezed — without that there is no per-hand grab/release nor a two-handed grip.
+Today there are **two actions** (`grip_left`, `grip_right`, `FLOAT`, with the `subactionPath` of their hand, via
+`vr_make_action_sub`), and `MOD_BTN_WALK` still comes from the **larger** of the two, as before.
+It is the same pattern already used in the pose actions (`aim_left`/`aim_right`). The hand paths
+started being resolved **before** the creation of the actions, because now they need them.
 
-### Arma na mão: `Mod_ViewModel` (v6, `MOD_CAP_DISPLAY`)
-Até a v5 o viewmodel era intocável: o client DLL escrevia origem e ângulos em
-`clgame.viewent` (a **orientação** vem do `V_CalcGunAngle`, derivada da view; a
-**origem** é o olho do player, com bob/smoothing) e o ref só desenhava — não havia
-hook nenhum no meio. A v6 abre o buraco com uma struct **de entrada e saída**: o
-engine pré-preenche com o que o DLL montou e o Mod decide o que muda.
+### Weapon in hand: `Mod_ViewModel` (v6, `MOD_CAP_DISPLAY`)
+Until v5 the viewmodel was untouchable: the client DLL wrote origin and angles into
+`clgame.viewent` (the **orientation** comes from `V_CalcGunAngle`, derived from the view; the
+**origin** is the player's eye, with bob/smoothing) and the ref only drew — there was no
+hook in between. v6 opens the hole with an **input-and-output** struct: the
+engine pre-fills with what the DLL built and the Mod decides what changes.
 
-| Campo | Sentido | Para que |
+| Field | Direction | What for |
 |---|---|---|
-| `eye` | entrada | olho do pass corrente |
-| `player_origin[3]` | entrada | olho **central** do player no mundo — sem o offset de roomscale e **sem o afastamento entre os olhos** |
-| `origin[3]`, `angles[3]` | entrada/saída | o que o client DLL escreveu; o Mod sobrescreve e marca |
-| `model_name[64]` | entrada | ex.: `v_ak47.mdl` — deixa o Mod afinar o encaixe por classe de arma |
-| `has_origin`, `has_angles` | saída | aplicar `origin[]` / `angles[]` (os ângulos espelham em `curstate.angles` e `latched.prevangles`, como o DLL faz) |
-| `world_depth` | saída | depth **normal**: a arma é ocluída pelo mundo |
-| `hide` | saída | não desenhar o viewmodel (o Mod desenha o dele) |
+| `eye` | input | eye of the current pass |
+| `player_origin[3]` | input | **central** eye of the player in the world — without the roomscale offset and **without the separation between the eyes** |
+| `origin[3]`, `angles[3]` | input/output | what the client DLL wrote; the Mod overrides and marks |
+| `model_name[64]` | input | e.g.: `v_ak47.mdl` — lets the Mod fine-tune the fit per weapon class |
+| `has_origin`, `has_angles` | output | apply `origin[]` / `angles[]` (the angles mirror into `curstate.angles` and `latched.prevangles`, as the DLL does) |
+| `world_depth` | output | **normal** depth: the weapon is occluded by the world |
+| `hide` | output | do not draw the viewmodel (the Mod draws its own) |
 
-Três decisões que não são óbvias:
+Three decisions that are not obvious:
 
-1. **Chamado DEPOIS do `Mods_Camera` e por olho.** Depois porque o `V_GetRefParams`
-   **zera** `rvp->flags` (`cl_view.c`) — uma flag pedida antes dele seria apagada.
-   Por olho porque o `pfnCalcRefdef` roda de novo a cada pass e reescreve o
-   viewmodel: sem reaplicar, no segundo olho a arma voltaria para o meio da cabeça.
-   Consequência de contrato: o Mod precisa ser **idempotente dentro do frame** (só
-   ler estado).
-2. **`player_origin` é o olho central, não o `vieworigin` do `rvp`.** O vieworigin já
-   saiu do `Mods_Camera` com o offset de roomscale **e** com o afastamento do olho. A
-   arma é um objeto único no mundo e os dois olhos têm de vê-la no mesmo lugar: usar
-   o vieworigin daria ~1,3 cm de disparidade por olho e a arma apareceria com
-   profundidade errada.
-3. **`RF_VIEWMODEL_WORLD` desliga um hack, não acrescenta um recurso.** O
-   `R_DrawViewModel` comprime o depth range do viewmodel (`VIEWMODEL_DEPTH_RANGE`)
-   justamente para a arma **nunca** cortar na parede — comportamento certo num
-   monitor e errado em VR, onde a arma tem de desaparecer atrás da geometria. Sem
-   pedir a flag, **nada muda** para nenhum Mod.
+1. **Called AFTER `Mods_Camera` and per eye.** After because `V_GetRefParams`
+   **zeroes** `rvp->flags` (`cl_view.c`) — a flag requested before it would be erased.
+   Per eye because `pfnCalcRefdef` runs again on every pass and rewrites the
+   viewmodel: without reapplying, on the second eye the weapon would go back to the middle of the
+   head. Contract consequence: the Mod must be **idempotent within the frame** (only
+   read state).
+2. **`player_origin` is the central eye, not the `rvp`'s `vieworigin`.** The vieworigin already
+   left `Mods_Camera` with the roomscale offset **and** with the eye separation. The
+   weapon is a single object in the world and both eyes have to see it in the same place: using
+   the vieworigin would give ~1.3 cm of disparity per eye and the weapon would appear with the
+   wrong depth.
+3. **`RF_VIEWMODEL_WORLD` turns off a hack, it does not add a feature.** The
+   `R_DrawViewModel` compresses the viewmodel's depth range (`VIEWMODEL_DEPTH_RANGE`)
+   precisely so the weapon **never** cuts into the wall — correct behavior on a
+   monitor and wrong in VR, where the weapon has to disappear behind geometry. Without
+   requesting the flag, **nothing changes** for any Mod.
 
-O painel de debug continua sendo 2D na janela: nada aqui o empurra para o headset —
-quem trata menus/HUD no HMD é `Mod_Hud` + o canvas 2D (v8, §"Menus no headset").
+The debug panel remains 2D on the window: nothing here pushes it to the headset —
+whoever handles menus/HUD on the HMD is `Mod_Hud` + the 2D canvas (v8, §"Menus in the headset").
 
-### Teclado: `Mod_Key` (v7, `MOD_CAP_KEYS`)
+### Keyboard: `Mod_Key` (v7, `MOD_CAP_KEYS`)
 
-Chamado no **topo** do `Key_Event` do engine (`engine/client/input/in_keys.c`),
-logo depois do `Key_Rotate` e antes de tudo: teclado virtual, console, menu,
-binds e o `pfnKey_Event` do cliente DLL.
+Called at the **top** of the engine's `Key_Event` (`engine/client/input/in_keys.c`),
+right after `Key_Rotate` and before everything: virtual keyboard, console, menu,
+binds and the client DLL's `pfnKey_Event`.
 
 ```c
 int (*Mod_Key)( int key, int down );   // 1 = consumido
 ```
 
-- **`key`** é o keynum do engine (`engine/keydefs.h`): teclas imprimíveis chegam
-  como **ASCII minúsculo** (`'a'`=97, `','`=44) e as especiais como constantes
-  (`K_F9`=143, `K_HOME`=151…). Como o `mod_api.h` é autocontido de propósito, as
-  especiais que uma UI de debug costuma querer estão fixadas nele como
-  `MOD_KEY_*` — e o mapeamento é por **scancode**, não por layout: `'['`/`']'`
-  são as teclas onde o layout americano as tem (no ABNT2 ficam trocadas).
-- **Retorno 1 = consumido**: o `Key_Event` encerra ali e a tecla **não chega ao
-  jogo** (nem aos binds). Devolver 0 segue o caminho normal.
-- **Consumir só o que se usa.** Um Mod deve devolver 0 quando a UI dele está
-  desligada — consumir sempre apagaria a tecla do jogo sem o usuário pedir nada.
-  Quem quiser preservar o *down* e o *up* coerentes (para o jogo não ver meia
-  tecla) consome os dois eventos.
+- **`key`** is the engine keynum (`engine/keydefs.h`): printable keys arrive
+  as **lowercase ASCII** (`'a'`=97, `','`=44) and specials as constants
+  (`K_F9`=143, `K_HOME`=151…). Since `mod_api.h` is self-contained on purpose, the
+  specials that a debug UI usually wants are pinned in it as
+  `MOD_KEY_*` — and the mapping is by **scancode**, not by layout: `'['`/`']'`
+  are the keys where the US layout has them (on ABNT2 they are swapped).
+- **Return 1 = consumed**: the `Key_Event` ends there and the key **does not reach the
+  game** (nor the binds). Returning 0 follows the normal path.
+- **Consume only what you use.** A Mod should return 0 when its UI is
+  off — consuming always would erase the key from the game without the user asking for anything.
+  Whoever wants to preserve the *down* and the *up* coherent (so the game doesn't see half a
+  key) consumes both events.
 
-Uso de referência: o ajuste fino do IPD do `mod_vr` (`VR_IPD`/`mods/vr_ipd.cfg`)
-liga o modo com F9/Home/End e, enquanto ele está ligado, consome `-`, `=`, `,`,
-`.` e `0`. Fora do modo, nenhuma tecla é consumida.
+Reference use: the IPD fine-tuning of `mod_vr` (`VR_IPD`/`mods/vr_ipd.cfg`)
+turns the mode on with F9/Home/End and, while it is on, consumes `-`, `=`, `,`,
+`.` and `0`. Outside the mode, no key is consumed.
 
-### Menus no headset: `Mod_Hud` + o canvas 2D (v8, `MOD_CAP_HUD`)
+### Menus in the headset: `Mod_Hud` + the 2D canvas (v8, `MOD_CAP_HUD`)
 
-**O problema:** o menu do jogo (pausa, time, classe, compra) é desenhado pelo
-`mainui`/client DLL com as funções **2D do engine**, direto no framebuffer da
-janela. Para ele existir no headset não dá para "reimplementar o menu": é preciso
-**capturar esse desenho** e mostrá-lo lá. E para o ponteiro funcionar, o caminho
-mais curto é o inverso: deixar o engine **crer** que o mouse está onde o laser
-aponta.
+**The problem:** the game menu (pause, team, class, buy) is drawn by
+`mainui`/client DLL with the engine's **2D functions**, straight into the window's
+framebuffer. For it to exist in the headset you cannot "reimplement the menu": you must
+**capture that drawing** and show it there. And for the pointer to work, the shortest
+path is the reverse: let the engine **believe** the mouse is where the laser
+points.
 
-**Três peças, cada uma num lugar diferente:**
+**Three pieces, each in a different place:**
 
-1. **Fatos** (`Mod_Hud`, 1x/frame): o engine entrega `menu_open` (`cls.key_dest ==
-   key_menu` — o menu do ESC e os menus do client, time/classe/compra, **todos**
-   marcam `KEY_MENU` ao abrir), `ui_visible` (`UI_IsVisible()`), o tamanho do
-   espaço 2D e a textura do canvas; o Mod devolve `want_canvas`,
-   `has_pointer`/`x`/`y` e `buttons`. Chamado em `Host_Frame` **depois** do
-   `Mods_FramePre` e **antes** do input frame — é essa posição que faz o cursor e
-   o clique valerem para o frame que está começando.
-   O predicado **não** é `!= key_game` de propósito: isso incluiria o console
-   (`key_console`) e o modo de mensagem, e abrir o console ligaria o painel do
-   headset sem menu nenhum dentro dele (console e HUD ficam fora — decisão do dono
-   em 2026-10-12: "só os menus").
-2. **Canvas 2D** (`ref/gl/gl_fbo.c` + `engine/client/cl_view.c`): com
-   `want_canvas` (e `menu_open` — trava dupla), o `V_PostRender` desvia os
-   **menus** do frame (`VGui_Paint` + `UI_UpdateMenu`) para um alvo RGBA8 do
-   tamanho do espaço 2D, criado sob demanda (`R_HudCanvasBegin`), e no fim devolve
-   o resultado para a **janela** com blend (`R_HudCanvasEnd`) — sem isso o monitor
-   ficaria sem menu. O Mod recebe o `texnum` e desenha o canvas nos olhos.
-   **O canvas NÃO captura o HUD** (nem o console, nem os overlays de debug): eles
-   são desenhados direto na janela, antes do `R_HudCanvasBegin`. Isso é requisito,
-   não detalhe — o HUD é conteúdo de jogo e, capturado no canvas, aparecia **por
-   cima do menu de compra** dentro do headset (o ícone verde de "zona de compra",
-   o radar, a mira e vida/munição flutuando sobre os itens, atrapalhando a
-   leitura). Foi assim que o dono descreveu o defeito em 2026-10-12: "um elemento
-   azul/ciano que não é a tela, mas por cima dela". Medido: sem o HUD no canvas, o
-   canvas do menu de compra perde ~3 mil pixels opacos (o ícone) e o menu fica
-   idêntico.
-3. **Cursor virtual** (`engine/client/input/input.c` + `cl_game.c`): a posição
-   absoluta do cursor de menu tem **dois consumidores** e os dois passam a ler
-   `IN_GetCursorPos` — `IN_MouseMove` (→ `UI_MouseMove`, a UI do engine) e o slot
-   `GetMousePosition` do `cl_enginefunc_t` (→ `g_pMenu->MouseMove`, os menus do
-   **client DLL**). Um só ponto de override: se o Mod escrevesse num só, o outro
-   puxaria o cursor de volta e o hover piscaria. O clique é
-   `IN_SetVirtualButton` → `IN_MouseEvent( 0, down )` → em `key_menu` cai em
-   `Key_Event( K_MOUSE1 )` → `UI_KeyEvent` → o item do menu (`K_MOUSE1` = 241).
+1. **Facts** (`Mod_Hud`, 1x/frame): the engine delivers `menu_open` (`cls.key_dest ==
+   key_menu` — the ESC menu and the client menus, team/class/buy, **all**
+   mark `KEY_MENU` on opening), `ui_visible` (`UI_IsVisible()`), the size of the 2D
+   space and the canvas texture; the Mod returns `want_canvas`,
+   `has_pointer`/`x`/`y` and `buttons`. Called in `Host_Frame` **after**
+   `Mods_FramePre` and **before** the input frame — it is this position that makes the cursor and
+   the click count for the frame that is starting.
+   The predicate is **not** `!= key_game` on purpose: that would include the console
+   (`key_console`) and message mode, and opening the console would turn on the headset
+   panel with no menu inside it (console and HUD stay out — the owner's decision
+   on 2026-10-12: "only the menus").
+2. **2D canvas** (`ref/gl/gl_fbo.c` + `engine/client/cl_view.c`): with
+   `want_canvas` (and `menu_open` — double lock), `V_PostRender` diverts the frame's
+   **menus** (`VGui_Paint` + `UI_UpdateMenu`) to an RGBA8 target the size of the 2D
+   space, created on demand (`R_HudCanvasBegin`), and at the end returns
+   the result to the **window** with blend (`R_HudCanvasEnd`) — without that the monitor
+   would be left without a menu. The Mod receives the `texnum` and draws the canvas on the eyes.
+   **The canvas does NOT capture the HUD** (nor the console, nor the debug overlays): they
+   are drawn straight to the window, before `R_HudCanvasBegin`. That is a requirement,
+   not a detail — the HUD is game content and, captured in the canvas, appeared **on
+   top of the buy menu** inside the headset (the green "buy zone" icon,
+   the radar, the crosshair and health/ammo floating over the items, hindering the
+   reading). That is how the owner described the defect on 2026-10-12: "a blue/cyan
+   element that is not the screen, but on top of it". Measured: without the HUD in the canvas, the
+   buy menu canvas loses ~3 thousand opaque pixels (the icon) and the menu is
+   identical.
+3. **Virtual cursor** (`engine/client/input/input.c` + `cl_game.c`): the absolute
+   position of the menu cursor has **two consumers** and both start reading
+   `IN_GetCursorPos` — `IN_MouseMove` (→ `UI_MouseMove`, the engine UI) and the slot
+   `GetMousePosition` of `cl_enginefunc_t` (→ `g_pMenu->MouseMove`, the **client DLL**
+   menus). A single override point: if the Mod wrote to only one, the other
+   would pull the cursor back and the hover would flicker. The click is
+   `IN_SetVirtualButton` → `IN_MouseEvent( 0, down )` → in `key_menu` it lands in
+   `Key_Event( K_MOUSE1 )` → `UI_KeyEvent` → the menu item (`K_MOUSE1` = 241).
 
-**`R_InvalidateTextures()`** (`ref/gl/gl_fbo.c`): o Mod desenha com texturas
-**cruas** (`pglBindTexture`), que o cache do ref não vê — e o cache é consultado
-por igualdade ("já está essa, não re-bindo"). Sem invalidar depois de cada ponto
-em que o Mod desenha (`Mods_AfterEyes`, `Mods_Overlay2D`), o próximo `GL_Bind` do
-engine pode **pular** o bind e a UI/3D sair com a textura do Mod.
+**`R_InvalidateTextures()`** (`ref/gl/gl_fbo.c`): the Mod draws with **raw** textures
+(`pglBindTexture`), which the ref's cache does not see — and the cache is consulted
+by equality ("it's already that one, don't rebind"). Without invalidating after each point
+where the Mod draws (`Mods_AfterEyes`, `Mods_Overlay2D`), the next engine `GL_Bind` may
+**skip** the bind and the UI/3D come out with the Mod's texture.
 
-**Orientação do painel (bug do espelho, 2026-10-12):** a âncora usa frente e
-direita **horizontais** (`fwd = (cy, sy, 0)`, `right = fwd × up = (sy, −cy, 0)`) e
-o Mod projeta o retângulo pelo frustum assimétrico de cada olho. Com a direita
-escrita como `(−sy, −cy, 0)` (só o X invertido) o retângulo deixava de ser
-perpendicular à frente e o painel saía **espelhado** em todo yaw com seno não nulo
-e **cisalhado** nos demais — era o "menu espelhado" relatado no headset. A conta
-fecha: `right` tem de ser `fwd × up`, como no `AngleVectors` do engine com
-pitch/roll zero. Verificação sem headset: `/tmp/warp_panel.py` projeta o canvas
-real com a mesma matemática do Mod e mostra o painel como ele sai no HMD —
-comparando os dois vetores, o antigo sai espelhado e o novo correto; uma varredura
-de 72 yaws mostra 70 falhas com o vetor antigo (só 0° e 180° passavam) e zero com
-o corrigido.
+**Panel orientation (mirror bug, 2026-10-12):** the anchor uses **horizontal** forward and
+right (`fwd = (cy, sy, 0)`, `right = fwd × up = (sy, −cy, 0)`) and
+the Mod projects the rectangle through each eye's asymmetric frustum. With the right
+written as `(−sy, −cy, 0)` (only X inverted) the rectangle stopped being
+perpendicular to the forward and the panel came out **mirrored** at every yaw with non-zero sine
+and **sheared** at the others — it was the "mirrored menu" reported in the headset. The math
+checks out: `right` must be `fwd × up`, as in the engine's `AngleVectors` with
+pitch/roll zero. Verification without a headset: `/tmp/warp_panel.py` projects the real
+canvas with the same math as the Mod and shows the panel as it comes out on the HMD —
+comparing the two vectors, the old one comes out mirrored and the new one correct; a sweep
+of 72 yaws shows 70 failures with the old vector (only 0° and 180° passed) and zero with
+the fixed one.
 
-**Debug sem headset:** o cvar privilegiado `hud_ptr_test` (default 0) força o
-canvas e pilota o cursor; `hud_ptr_test 2` **abre e fecha o menu sozinho** (o
-resto dos `+comandos` da linha de comando se perde no carregamento do mapa, então
-não dá para encadear `+togglemenu`) e `hud_ptr_test 3` abre o **menu de compra
-real** pelo comando de cliente `showvguimenu 28` (`MENU_BUY`, o mesmo caminho da
-tecla `b`) e o deixa aberto — é o conteúdo que o dono vê no headset. Com `-console`
-(modo janela só tem console com essa flag: `Con_Printf` sai cedo sem
-`host.allow_console`) o rastro `hud_ptr_test:`/`UI_MouseMove`/`UI_KeyEvent` aparece
-no stdout, e o `-dev 1` liga também o `Con_DPrintf` do `UI_MouseMove`/`UI_KeyEvent`.
+**Debug without a headset:** the privileged cvar `hud_ptr_test` (default 0) forces the
+canvas and drives the cursor; `hud_ptr_test 2` **opens and closes the menu on its own** (the
+rest of the command-line `+commands` are lost during map loading, so
+you can't chain `+togglemenu`) and `hud_ptr_test 3` opens the **real buy menu**
+through the client command `showvguimenu 28` (`MENU_BUY`, the same path as the
+`b` key) and leaves it open — it is the content the owner sees in the headset. With `-console`
+(window mode only has a console with that flag: `Con_Printf` returns early without
+`host.allow_console`) the trace `hud_ptr_test:`/`UI_MouseMove`/`UI_KeyEvent` appears
+on stdout, and `-dev 1` also turns on the `Con_DPrintf` of `UI_MouseMove`/`UI_KeyEvent`.
 
-O **conteúdo exato do painel** sai por `HUD_CANVAS_DUMP=/tmp/x.pam` (+
-`HUD_CANVAS_DUMP_FRAME=<n>`, o n-ésimo frame de canvas — o 1º costuma ser cedo
-demais), com um histograma de alfa no console: é o que separa "o jogo pintou" de
-"o mundo vazou pelo alfa" e foi o que identificou o HUD sobre o menu. O dump do
-**mod_vr** (`VR_PANEL_DUMP`) pega a **janela** (o canvas já blendado sobre o
-espelho), então os dois são complementares: canvas = conteúdo do painel, janela =
-caminho do monitor.
+The **exact content of the panel** comes out through `HUD_CANVAS_DUMP=/tmp/x.pam` (+
+`HUD_CANVAS_DUMP_FRAME=<n>`, the n-th canvas frame — the 1st is usually too
+early), with an alpha histogram on the console: it is what separates "the game painted" from
+"the world leaked through the alpha" and it is what identified the HUD over the menu. The
+**mod_vr** dump (`VR_PANEL_DUMP`) captures the **window** (the canvas already blended over the
+mirror), so the two are complementary: canvas = panel content, window =
+monitor path.
 
-### Call sites no engine (implementados na Fase 1)
+### Call sites in the engine (implemented in Phase 1)
 
-| Call site | Arquivo | Hook |
+| Call site | File | Hook |
 |---|---|---|
-| `Host_Init` (após exec dos configs) | `engine/common/host.c` | `Mods_Init` — parse `-mod <nome>` + load |
+| `Host_Init` (after executing the configs) | `engine/common/host.c` | `Mods_Init` — parse `-mod <name>` + load |
 | `Host_Frame` | `engine/common/host.c` | `Mods_FramePre` → **`CL_ModHud`/`Mods_Hud` (v8)** → `Host_InputFrame` → `Mods_Input` → … → `Mods_FramePost` |
-| `CL_CreateCmd` (após o client DLL) | `engine/client/cl_main.c` | `IN_ModAppendMove` (v5) — aplica a amostra do Mod no `usercmd` |
-| `Host_ShutdownWithReason` | `engine/common/host.c` | `Mods_Shutdown` (unload limpo) |
-| `SCR_UpdateScreen` | `engine/client/cl_scrn.c` | `Mods_BeginFrame` (pré-3D), `Mods_EndFrame` (pós-render); o antigo `Mods_HudFrame` saiu na v8 (virou `CL_ModHud`, em `Host_Frame`) |
-| `V_RenderView` (por view pass) | `engine/client/cl_view.c` | `Mods_Camera( &rvp, viewnum )` — pode sobrescrever a view |
-| `V_RenderView` (por olho, **após** `Mods_Camera`) | `engine/client/cl_view.c` | `Mods_ViewModel` (v6) — arma na mão; aplica `clgame.viewent` + `RF_NO_VIEWMODEL`/`RF_VIEWMODEL_WORLD` no `rvp` |
-| `V_PostRender` (HUD) | `engine/client/cl_view.c` | HUD/`SCR_TileClear` desenham **direto na janela** (não entram no canvas do headset) |
-| `V_PostRender` (início dos menus) | `engine/client/cl_view.c` | `R_HudCanvasBegin` (v8) — desvia os MENUS (`VGui_Paint`/`UI_UpdateMenu`) para o canvas quando o Mod pede |
-| `V_PostRender` (fim dos menus, pré-`SCR_MakeScreenShot`) | `engine/client/cl_view.c` | `R_HudCanvasEnd` (v8) — devolve o canvas para a janela (com blend) |
-| `V_PostRender` (fim, pré-swap) | `engine/client/cl_view.c` | `Mods_Overlay2D` (v3) — overlay 2D por cima da UI; `R_InvalidateTextures` (v8) depois |
-| `IN_MouseMove` / `GetMousePosition` | `engine/client/input/input.c`, `engine/client/dll_int/cl_game.c` | `IN_GetCursorPos` (v8) — cursor virtual do Mod, lido pelos dois consumidores |
-| `Key_Event` (topo, após `Key_Rotate`) | `engine/client/input/in_keys.c` | `Mods_Key` (v7) — tecla antes de todo handler; pode consumir |
-| Contexto GL pronto | `engine/platform/sdl2/vid_sdl2.c` | `Mods_VideoInit( window, ctx )` |
+| `CL_CreateCmd` (after the client DLL) | `engine/client/cl_main.c` | `IN_ModAppendMove` (v5) — applies the Mod sample to the `usercmd` |
+| `Host_ShutdownWithReason` | `engine/common/host.c` | `Mods_Shutdown` (clean unload) |
+| `SCR_UpdateScreen` | `engine/client/cl_scrn.c` | `Mods_BeginFrame` (pre-3D), `Mods_EndFrame` (post-render); the old `Mods_HudFrame` left in v8 (became `CL_ModHud`, in `Host_Frame`) |
+| `V_RenderView` (per view pass) | `engine/client/cl_view.c` | `Mods_Camera( &rvp, viewnum )` — can override the view |
+| `V_RenderView` (per eye, **after** `Mods_Camera`) | `engine/client/cl_view.c` | `Mods_ViewModel` (v6) — weapon in hand; applies `clgame.viewent` + `RF_NO_VIEWMODEL`/`RF_VIEWMODEL_WORLD` to the `rvp` |
+| `V_PostRender` (HUD) | `engine/client/cl_view.c` | HUD/`SCR_TileClear` draw **straight to the window** (they do not enter the headset canvas) |
+| `V_PostRender` (start of the menus) | `engine/client/cl_view.c` | `R_HudCanvasBegin` (v8) — diverts the MENUS (`VGui_Paint`/`UI_UpdateMenu`) to the canvas when the Mod asks |
+| `V_PostRender` (end of the menus, pre-`SCR_MakeScreenShot`) | `engine/client/cl_view.c` | `R_HudCanvasEnd` (v8) — returns the canvas to the window (with blend) |
+| `V_PostRender` (end, pre-swap) | `engine/client/cl_view.c` | `Mods_Overlay2D` (v3) — 2D overlay on top of the UI; `R_InvalidateTextures` (v8) after |
+| `IN_MouseMove` / `GetMousePosition` | `engine/client/input/input.c`, `engine/client/dll_int/cl_game.c` | `IN_GetCursorPos` (v8) — the Mod's virtual cursor, read by both consumers |
+| `Key_Event` (top, after `Key_Rotate`) | `engine/client/input/in_keys.c` | `Mods_Key` (v7) — key before every handler; can consume |
+| GL context ready | `engine/platform/sdl2/vid_sdl2.c` | `Mods_VideoInit( window, ctx )` |
 
-### Carga e busca
+### Loading and search
 
-- Linha de comando: `./xash3d -game cstrike -mod null`.
-- Caminhos testados, em ordem: `<rootdir>/mods/mod_<nome>.so`, `<rootdir>/mod_<nome>.so` (rootdir = pasta do `xash3d`, ex.: `game/`).
-- Console: `mod_info` mostra mod carregado, capabilities e contadores de hooks.
-- Erros (arquivo ausente, símbolo ausente, `api_version` errado, `Mod_Init` recusando) recusam o load **sem derrubar o jogo** — o engine segue sem mod.
+- Command line: `./xash3d -game cstrike -mod null`.
+- Tested paths, in order: `<rootdir>/mods/mod_<name>.so`, `<rootdir>/mod_<name>.so` (rootdir = the `xash3d` folder, e.g.: `game/`).
+- Console: `mod_info` shows the loaded mod, capabilities and hook counters.
+- Errors (missing file, missing symbol, wrong `api_version`, `Mod_Init` refusing) refuse the load **without bringing down the game** — the engine continues without a mod.
 
-## 4. Regras para autores de Mod
+## 4. Rules for Mod authors
 
-1. Todo acesso ao engine passa pelo `mod_engine_api` recebido em `Mod_Init` —
-   nada de linking direto contra símbolos do engine.
-2. Nunca bloqueie: hooks rodam no frame do jogo; trabalho pesado vai pra thread própria.
-3. Respeite `capabilities`: o engine só chama o que foi declarado.
-4. Um Mod não pode assumir que outro Mod existe.
-5. Erro de versão (`api_version` diferente) = recusa de load com mensagem clara.
+1. All access to the engine goes through the `mod_engine_api` received in `Mod_Init` —
+   no direct linking against engine symbols.
+2. Never block: hooks run in the game frame; heavy work goes to its own thread.
+3. Respect `capabilities`: the engine only calls what was declared.
+4. A Mod cannot assume another Mod exists.
+5. Version error (`api_version` different) = load refusal with a clear message.
 
-## 5. Mods planejados
+## 5. Planned Mods
 
 | Mod | Capabilities | Status |
 |-----|--------------|--------|
-| `vr` (OpenXR, WiVRn/Quest 3) | display + hud + input + keys | **em construção** — estéreo por olho (frustum assimétrico + IPD do runtime), painel de debug (`Mod_Overlay2D`), menus no headset (`Mod_Hud`), input e arma na mão (Fase 6), e o **viewmodel próprio** (braços+arma com coldre, dedos e duas mãos) na classe `pistol` — ver `docs/HANDS.md` |
-| `null` (template log-only) | nenhuma (só lifecycle + frame) | **feito (Fase 1)** — `mods/null/`, `game/mods/mod_null.so`; também é o teste de gating do engine |
-| *futuro:* arma 6DoF, HD pack, gameplay, acessibilidade | — | pós-MVP, sobre a mesma ABI |
+| `vr` (OpenXR, WiVRn/Quest 3) | display + hud + input + keys | **under construction** — per-eye stereo (asymmetric frustum + runtime IPD), debug panel (`Mod_Overlay2D`), menus in the headset (`Mod_Hud`), input and weapon in hand (Phase 6), and the **own viewmodel** (arms+weapon with holster, fingers and two-handed grip) in the `pistol` class — see `docs/HANDS.md` |
+| `null` (log-only template) | none (lifecycle + frame only) | **done (Phase 1)** — `mods/null/`, `game/mods/mod_null.so`; it is also the engine gating test |
+| *future:* 6DoF weapon, HD pack, gameplay, accessibility | — | post-MVP, over the same ABI |
 
-## 6. Como escrever um Mod (tutorial rápido)
+## 6. How to write a Mod (quick tutorial)
 
-1. Copie `mods/null/` para `mods/<seumod>/` e troque o nome em `mod_api.mod_name`.
-2. Declares as capabilities que vai usar; implemente os hooks correspondentes.
-3. Build: um `gcc -O2 -fPIC -shared -I<engine>/engine/common -o mod_<nome>.so <fonte>` basta
-   (veja `mods/null/build.sh` — o único include é `mod_api.h`, autocontido).
-4. Instale em `game/mods/mod_<nome>.so` e rode com `-mod <nome>`.
-5. Regras da seção 4 valem; erros de load não derrubam o jogo.
+1. Copy `mods/null/` to `mods/<yourmod>/` and change the name in `mod_api.mod_name`.
+2. Declare the capabilities you will use; implement the corresponding hooks.
+3. Build: a `gcc -O2 -fPIC -shared -I<engine>/engine/common -o mod_<name>.so <source>` suffices
+   (see `mods/null/build.sh` — the only include is `mod_api.h`, self-contained).
+4. Install to `game/mods/mod_<name>.so` and run with `-mod <name>`.
+5. The rules of section 4 apply; load errors do not bring down the game.
 
-## 7. Referências
+## 7. References
 
-- `PLAN.md` na raiz do workspace — plano completo, fases e critérios de aceite.
-- Base de engine: `src/xash3d-fwgs` (branch `vr-mod`) · client: `src/cs16-client`
-  (branch `vr-mod`) · baseline dos binários flat: `backups/flat-baseline-20261011/`.
+- `PLAN.md` at the workspace root — complete plan, phases and acceptance criteria.
+- Engine base: `src/xash3d-fwgs` (branch `vr-mod`) · client: `src/cs16-client`
+  (branch `vr-mod`) · flat binaries baseline: `backups/flat-baseline-20261011/`.

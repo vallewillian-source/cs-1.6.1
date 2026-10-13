@@ -1,51 +1,53 @@
-# botbrain — o "cérebro lento" dos bots (Jev / TypeSafe)
+# botbrain — the bots' "slow brain" (Jev / TypeSafe)
 
-Um sidecar Python que dá **uma decisão de time por vez** aos bots do CS 1.6
-(ReGameDLL) no servidor dedicado local. A DLL (`cs_bot_advisor`, dentro do
-`cs.so`) escreve os fatos da rodada num arquivo, o botbrain pergunta ao modelo
-**Jev** (TypeSafe) qual intent usar, e escreve a resposta de volta. A DLL aplica.
+A Python sidecar that gives the CS 1.6.1 bots (ReGameDLL) on the local
+dedicated server **one team decision at a time**. The DLL (`cs_bot_advisor`,
+inside `cs.so`) writes the round's facts to a file, botbrain asks the **Jev**
+model (TypeSafe) which intent to use, and writes the answer back. The DLL
+applies it.
 
 ```
-servidor (podman, 32-bit)                 host (Python)
+server (podman, 32-bit)                 host (Python)
 ┌─────────────────────────────┐          ┌──────────────────────────┐
-│ cs.so  CCSBot (o "músculo") │ observe  │ botbrain.py              │
-│ cs_bot_advisor ────────────►│─────────►│  1. lê observe_<t|ct>.txt│
-│   · escreve observe_*.txt   │          │  2. assinatura → cache?  │
-│   · lê plan_*.txt ◄─────────│◄─────────│  3. Jev /v1/systemone    │
-│   · aplica nos bots         │  plan    │  4. escreve plan_*.txt   │
+│ cs.so  CCSBot (the "muscle") │ observe  │ botbrain.py              │
+│ cs_bot_advisor ────────────►│─────────►│1. read observe_<t|ct>.txt│
+│   · writes observe_*.txt    │          │  2. signature → cache?   │
+│   · reads plan_*.txt ◄──────│◄─────────│  3. Jev /v1/systemone    │
+│   · applies to bots         │  plan    │  4. writes plan_*.txt    │
 └─────────────────────────────┘          │  traces/decisions.jsonl  │
         cstrike/advisor/                  └──────────────────────────┘
 ```
 
-## Por que assim
+## Why this way
 
-- **Bots vivem no servidor** → VR e flat jogam contra os mesmos bots, sem
-  nenhum trabalho extra. Nada aqui é client-side.
-- **1 request por decisão** — o mesmo contrato do Jev: estado indexado compacto
-  entra, uma escolha de um conjunto fechado sai. É barato e cacheável.
-- **Nunca bloqueia o jogo**: o transporte é um arquivo. Se este processo morrer,
-  os bots continuam jogando (o sidecar não escreve plano; a DLL mantém o que
-  tinha, e no início de rodada cai no comportamento stock).
+- **Bots live on the server** → VR and flat play against the same bots, with
+  no extra work. Nothing here is client-side.
+- **1 request per decision** — the same contract as Jev: a compact indexed
+  state goes in, one choice from a closed set comes out. It's cheap and
+  cacheable.
+- **Never blocks the game**: the transport is a file. If this process dies,
+  the bots keep playing (the sidecar doesn't write a plan; the DLL keeps what
+  it had, and at round start it falls back to stock behavior).
 
-## Rodar
+## Running
 
 ```bash
-# tudo junto (sidecar + servidor):
+# everything together (sidecar + server):
 scripts/run-botbrain.sh
 
-# só o sidecar, contra um servidor que já está no ar:
+# only the sidecar, against a server that is already up:
 tools/botbrain/run.sh
-tools/botbrain/run.sh --once          # processa um tick e sai
-tools/botbrain/run.sh --no-model      # não chama o modelo (teste do mailbox/cache)
+tools/botbrain/run.sh --once          # processes one tick and exits
+tools/botbrain/run.sh --no-model      # doesn't call the model (mailbox/cache test)
 ```
 
-Credenciais: `~/Workspace/jev-ultrafast/.env` (`TYPESAFE_API_KEY`,
-`TYPESAFE_MODEL`) e o venv daquele projeto (que já tem `httpx[http2]`). Nada é
-copiado nem modificado no clone do jev.
+Credentials: `~/Workspace/jev-ultrafast/.env` (`TYPESAFE_API_KEY`,
+`TYPESAFE_MODEL`) and that project's venv (which already has `httpx[http2]`).
+Nothing is copied or modified in the jev clone.
 
-## Protocolo dos arquivos
+## File protocol
 
-`cstrike/advisor/observe_<t|ct>.txt` (a DLL escreve, `key=value`):
+`cstrike/advisor/observe_<t|ct>.txt` (the DLL writes, `key=value`):
 
 ```
 v=1
@@ -66,12 +68,12 @@ bomb_zone=none        # A | B | none
 history=RUSH_B,STACK_A
 ```
 
-`cstrike/advisor/plan_<t|ct>.txt` (o sidecar escreve):
+`cstrike/advisor/plan_<t|ct>.txt` (the sidecar writes):
 
 ```
 v=1
-seq=2712345           # monotônico: a DLL só aplica seq novo
-round=7              # precisa ser a rodada atual, senão é descartado
+seq=2712345           # monotonic: the DLL only applies a new seq
+round=7              # must be the current round, otherwise it is discarded
 intent=RUSH_B
 source=jev           # jev | cache
 ```
@@ -80,56 +82,57 @@ source=jev           # jev | cache
 
 T: `RUSH_B`, `RUSH_A_LONG`, `RUSH_A_SHORT`, `SPLIT_A`, `HOLD_AFTER_PLANT`,
 `ECO_SAVE`, `DEFAULT`. CT: `STACK_A`, `STACK_B`, `RETAKE_A`, `RETAKE_B`,
-`ECO_SAVE`, `DEFAULT`. A lista fechada e as regras do "coach" ficam em
-`intents.py`; os nomes têm que existir também em
+`ECO_SAVE`, `DEFAULT`. The closed list and the "coach" rules live in
+`intents.py`; the names must also exist in
 `src/ReGameDLL_CS/regamedll/dlls/bot/advisor/cs_bot_advisor.h`.
 
-`DEFAULT` = **não sobrescrever** nada (o CCSBot joga sozinho). O mapa
-intent→comportamento usa os centros de zona que o próprio mapa fornece
-(`TheCSBots()->GetZone(i)->m_center`), então não há coordenadas fixas de dust2
-no código.
+`DEFAULT` = **don't overwrite** anything (the CCSBot plays on its own). The
+intent→behavior map uses the zone centers that the map itself provides
+(`TheCSBots()->GetZone(i)->m_center`), so there are no hardcoded dust2
+coordinates in the code.
 
-## Custo — quanto a partida gastou
+## Cost — how much the match spent
 
-O trace grava o `usage` que o TypeSafe devolve a cada chamada, e o daemon fecha
-cada sessão com um resumo. Para ver o gasto de uma sessão:
+The trace records the `usage` that TypeSafe returns on each call, and the
+daemon closes each session with a summary. To see a session's spend:
 
 ```bash
-tools/botbrain/run.sh --report                     # tudo que está no trace
-tools/botbrain/run.sh --report 2026-10-13T15:52    # só desde esse instante
+tools/botbrain/run.sh --report                     # everything in the trace
+tools/botbrain/run.sh --report 2026-10-13T15:52    # only since that instant
 ```
 
-Saída típica:
+Typical output:
 
 ```
-decisões:        159
-chamadas ao Jev: 14  (cache: 145)
-latência:        média 254 ms · máx 455 ms
-tokens:          11193 entrada · 1101 saída
-custo (entrada): US$ 0.000470
+decisões:        159  (decisions)
+chamadas ao Jev: 14  (cache: 145)  (Jev calls)
+latência:        média 254 ms · máx 455 ms  (latency: avg · max)
+tokens:          11193 entrada · 1101 saída  (input · output)
+custo (entrada): US$ 0.000470  (cost, input)
 intents:         ECO_SAVE×111, HOLD_AFTER_PLANT×25, RETAKE_B×23
 ```
 
-Ao encerrar (Ctrl+C **ou** SIGTERM do `run-botbrain.sh`), o resumo também sai no
-fim do log:
+On shutdown (Ctrl+C **or** SIGTERM from `run-botbrain.sh`), the summary also
+goes to the end of the log:
 
 ```
 sessão: decisões=159 chamadas_ao_modelo=14 cache=145 erros=0 | tokens_entrada=11193 tokens_saída=1101
 ```
 
-Ordem de grandeza, medido: **~800 tokens de entrada e ~80 de saída por chamada**.
-O TypeSafe publica **US$ 42 por bilhão de tokens de entrada** (≈ US$ 0,042 por
-milhão), o que põe uma partida de minutos na casa de **menos de um centésimo de
-dólar**. O preço de **saída não é publicado** no site, então o `custo (entrada)`
-do relatório é um piso — o número oficial é o console do TypeSafe.
+Order of magnitude, measured: **~800 input tokens and ~80 output tokens per
+call**. TypeSafe publishes **US$ 42 per billion input tokens** (≈ US$ 0.042 per
+million), which puts a match of a few minutes in the ballpark of **less than one
+cent of a dollar**. The **output** price **is not published** on the site, so
+the report's `custo (entrada)` is a floor — the official number is the TypeSafe
+console.
 
-O que mantém o gasto baixo é o desenho: uma decisão por time por momento
-(round start, mudança de fase, bomba plantada, clutch), com cache por
-assinatura — numa sessão medida, **14 chamadas cobriram 159 decisões**.
+What keeps the spend low is the design: one decision per team per moment
+(round start, phase change, bomb planted, clutch), with cache by signature — in
+one measured session, **14 calls covered 159 decisions**.
 
-### O que mantém barato
+### What keeps it cheap
 
-A assinatura da situação é **grossa de propósito** (fase, bomba/zona, clutch,
-faixa de economia, placar, último plano), então rodadas parecidas caem no cache
-e custam zero. Além disso há um `--min-call-interval` (padrão 2 s por time) para
-não disparar rajadas.
+The situation signature is **deliberately coarse** (phase, bomb/zone, clutch,
+economy bracket, score, last plan), so similar rounds fall into the cache and
+cost zero. In addition there is a `--min-call-interval` (default 2 s per team)
+so it doesn't fire bursts.

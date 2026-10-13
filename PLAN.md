@@ -1,397 +1,397 @@
-# PLAN.md — Mod VR para o CS 1.6 open-source (MVP)
+# PLAN.md — VR Mod for the open-source CS 1.6.1 (MVP)
 
-> Status: planejamento · Criado em 2026-10-11
+> Status: planning · Created on 2026-10-11
 >
-> Stack atual (rodando e validada): cliente **Xash3D FWGS (64-bit) + cs16-client** em `game/`,
-> servidor dedicado **ReHLDS + ReGameDLL_CS** em `server/` (podman), fontes e builds em `src/`.
-> Ambiente Fedora sem root (sudo indisponível): builds 32-bit do servidor via podman; cliente nativo.
+> Current stack (running and validated): client **Xash3D FWGS (64-bit) + cs16-client** in `game/`,
+> dedicated server **ReHLDS + ReGameDLL_CS** in `server/` (podman), sources and builds in `src/`.
+> Rootless Fedora environment (sudo unavailable): 32-bit server builds via podman; native client.
 
 ---
 
-## 1. Objetivo
+## 1. Objective
 
-Jogar o CS 1.6 atual (cliente em `game/`) em realidade virtual no Fedora, com **Meta Quest 3 via WiVRn** (PCVR: o jogo roda no PC e é transmitido ao óculos).
+Play the current CS 1.6.1 (client in `game/`) in virtual reality on Fedora, with **Meta Quest 3 via WiVRn** (PCVR: the game runs on the PC and is streamed to the headset).
 
-### 1.1 Definição de pronto do MVP
+### 1.1 MVP definition of done
 
-1. Jogo estereoscópico no Quest 3, com olhar 1:1 pela cabeça (pitch/yaw; câmera na altura dos olhos do player).
-2. Locomoção e ações **inteiramente pelos controles do Quest** (thumbsticks + botões), com mira pela cabeça.
-3. **HUD e menus legíveis e navegáveis dentro do óculos** (painel virtual + ponteiro laser nos controles), incluindo buy menu, scoreboard, console e menus do cs16-client.
-4. Uma partida completa contra bots (YAPB) no servidor dedicado local, **sem nenhuma mudança no servidor**.
-5. O modo flat atual permanece 100% intacto e é o fallback.
-6. Tudo implementado como **Mod VR** — primeiro usuário de uma **arquitetura de Mods** reutilizável (seção 2).
+1. Stereoscopic game on the Quest 3, with 1:1 head look (pitch/yaw; camera at the player's eye height).
+2. Locomotion and actions **entirely through the Quest controllers** (thumbsticks + buttons), with aim by the head.
+3. **HUD and menus legible and navigable inside the headset** (virtual panel + laser pointer on the controllers), including buy menu, scoreboard, console and cs16-client menus.
+4. A full match against bots (YAPB) on the local dedicated server, **with no change whatsoever on the server**.
+5. The current flat mode remains 100% intact and is the fallback.
+6. Everything implemented as a **VR Mod** — first user of a reusable **Mod architecture** (section 2).
 
-### 1.2 Fora do escopo do MVP (futuro, contextualiza a arquitetura)
+### 1.2 Out of the MVP scope (future, gives context to the architecture)
 
-- Arma em 6DoF nas mãos / mira realista por controle — explicitamente cortado pelo usuário.
-- Mãos, corpo, tracking facial, áudio espacial, passthrough.
-- Multiplayer VR-vs-flat com balanceamento, conteúdo novo, performance extrema (foveação agressiva etc.).
+- 6DoF weapon in the hands / realistic aim by controller — explicitly cut by the user.
+- Hands, body, facial tracking, spatial audio, passthrough.
+- VR-vs-flat multiplayer with balancing, new content, extreme performance (aggressive foveation etc.).
 
 ---
 
-## 2. Arquitetura proposta
+## 2. Proposed architecture
 
-### 2.1 Princípios
+### 2.1 Principles
 
-- **VR é 100% client-side.** Servidor (ReHLDS/ReGameDLL), protocolo de rede e conteúdo não mudam. Cliente VR e cliente flat jogam no mesmo servidor, indistinguíveis para ele.
-- **"Mod" ≠ "game dir".** Um Mod é uma biblioteca (`mod_<nome>.so`) que o engine carrega por parâmetro (`-mod <nome>`), recebendo hooks em pontos de extensão definidos. Nada duplica o conteúdo de `cstrike/`; nada muda no jogo sem o Mod.
-- **Contrato estável e versionado (C ABI).** O engine expõe uma interface única; Mods futuros (VR é o primeiro; depois: arma 6DoF, HD pack, gameplay, acessibilidade) usam a mesma interface. O engine **não** é re-patchado a cada Mod.
-- **Fallback total.** Sem `-mod`, o comportamento é byte-a-byte o atual. Hooks não configurados = no-op.
+- **VR is 100% client-side.** Server (ReHLDS/ReGameDLL), network protocol and content do not change. VR client and flat client play on the same server, indistinguishable to it.
+- **"Mod" ≠ "game dir".** A Mod is a library (`mod_<name>.so`) that the engine loads by parameter (`-mod <name>`), receiving hooks at defined extension points. Nothing duplicates the content of `cstrike/`; nothing changes in the game without the Mod.
+- **Stable, versioned contract (C ABI).** The engine exposes a single interface; future Mods (VR is the first; then: 6DoF weapon, HD pack, gameplay, accessibility) use the same interface. The engine is **not** re-patched for each Mod.
+- **Total fallback.** Without `-mod`, the behavior is byte-for-byte the current one. Hooks not configured = no-op.
 
-### 2.2 Camadas
+### 2.2 Layers
 
 ```
 ┌────────────────────────────────────────────────────┐
-│ cs16-client (client_amd64.so, menu_amd64.so)       │ HUD/gameplay — inalterado no MVP*;
-│                                                    │ desenha via API 2D do engine
+│ cs16-client (client_amd64.so, menu_amd64.so)       │ HUD/gameplay — unchanged in the MVP*;
+│                                                    │ draws via the engine's 2D API
 ├────────────────────────────────────────────────────┤
 │ Xash3D FWGS — branch `vr-mod`                      │
-│   + common/mod_api.h    contrato v1 dos Mods       │
-│   + engine/mod_loader.c loader (dlopen) + hooks    │  ← ÚNICO patch estrutural
-│   + ref_gl              renderer (patch mínimo p/  │
-│                          projeção/câmera externa)  │
+│   + common/mod_api.h    Mod contract v1            │
+│   + engine/mod_loader.c loader (dlopen) + hooks    │  ← ONLY structural patch
+│   + ref_gl              renderer (minimal patch for│
+│                         projection/external camera)│
 ├────────────────────────────────────────────────────┤
-│ mod_vr.so  ← PRIMEIRO MOD (OpenXR)                 │
-│   sessão+estéreo · input dos controles ·           │
-│   painel virtual de HUD/menus · pacing             │
+│ mod_vr.so  ← FIRST MOD (OpenXR)                    │
+│   session+stereo · controller input ·              │
+│   virtual HUD/menu panel · pacing                  │
 ├────────────────────────────────────────────────────┤
-│ WiVRn — runtime OpenXR (Flatpak user, sem root)    │
+│ WiVRn — OpenXR runtime (Flatpak user, no root)     │
 ├────────────────────────────────────────────────────┤
-│ Meta Quest 3 — client WiVRn (Meta Store), Wi-Fi    │
+│ Meta Quest 3 — WiVRn client (Meta Store), Wi-Fi    │
 └────────────────────────────────────────────────────┘
- * se hooks no engine não bastarem para algo do HUD,
-   ajusta-se o cs16-client na branch `vr-mod` (espera-se mínimo).
+ * if hooks in the engine are not enough for something in the HUD,
+   the cs16-client is adjusted on the `vr-mod` branch (expected to be minimal).
 ```
 
-### 2.3 Contrato de Mod (`mod_api.h`) — rascunho de design
+### 2.3 Mod contract (`mod_api.h`) — design draft
 
-Struct versionada, resolvida via um único símbolo exportado (`ModGetAPI`). Campos desconhecidos/`NULL` são ignorados pelo engine (compatibilidade para frente e para trás).
+Versioned struct, resolved through a single exported symbol (`ModGetAPI`). Unknown/`NULL` fields are ignored by the engine (forward and backward compatibility).
 
-- **Identidade**: `api_version`, `mod_name`, `capabilities` (bitmask: `display`, `input`, `hud`).
+- **Identity**: `api_version`, `mod_name`, `capabilities` (bitmask: `display`, `input`, `hud`).
 - **Lifecycle**: `Mod_Init(engine_api)`, `Mod_Shutdown()`.
-- **Frame**: `Mod_FramePre()` / `Mod_FramePost()` — pacing VR (frame sync OpenXR) e coleta de poses.
-- **Display** (capability `display`): `Mod_Camera(eye, view_t*)` — sobrescreve origem/ângulos/projeção **por olho**; `Mod_BeginFrame(gl_ctx)`, `Mod_EndFrame()` — swapchains, submit OpenXR; engine reconhece o Mod como "display owner" (desliga mouse grab, vsync de janela, cursor de software).
-- **Input** (capability `input`): `Mod_Input(input_sample_t*)` — injeta movimento/botões/ângulos pela mesma rota do teclado/mouse (client prediction intacta).
-- **HUD** (capability `hud`): `Mod_HudRedirect(target)` — redireciona desenho 2D para o canvas do Mod; `Mod_HudPointer(x, y, click)` — ponteiro laser injeta mousemove/click no espaço 2D.
+- **Frame**: `Mod_FramePre()` / `Mod_FramePost()` — VR pacing (OpenXR frame sync) and pose collection.
+- **Display** (capability `display`): `Mod_Camera(eye, view_t*)` — overrides origin/angles/projection **per eye**; `Mod_BeginFrame(gl_ctx)`, `Mod_EndFrame()` — swapchains, OpenXR submit; engine recognizes the Mod as "display owner" (turns off mouse grab, window vsync, software cursor).
+- **Input** (capability `input`): `Mod_Input(input_sample_t*)` — injects movement/buttons/angles through the same route as keyboard/mouse (client prediction intact).
+- **HUD** (capability `hud`): `Mod_HudRedirect(target)` — redirects 2D drawing to the Mod's canvas; `Mod_HudPointer(x, y, click)` — laser pointer injects mousemove/click in the 2D space.
 
-Regra de ouro: **o engine nunca conhece OpenXR**. Tudo que é VR vive no `mod_vr.so`.
+Golden rule: **the engine never knows about OpenXR**. Everything that is VR lives in `mod_vr.so`.
 
-### 2.4 Layout do código
+### 2.4 Code layout
 
 ```
 cs-opensource/
 ├── src/xash3d-fwgs/        branch `vr-mod`: common/mod_api.h, engine/mod_loader.c,
-│                           call sites de hooks, patch mínimo no ref_gl
-├── src/cs16-client/        branch `vr-mod` (espera-se: vazia ou quase)
+│                           hook call sites, minimal patch in ref_gl
+├── src/cs16-client/        branch `vr-mod` (expected: empty or nearly so)
 ├── mods/
-│   ├── vr/                 fontes do mod_vr (C++, OpenXR loader, GL)
-│   └── null/               Mod-template log-only (exemplo de doc + 2º Mod de teste)
-├── scripts/                build-openxr.sh · build-mods.sh · run-cs-vr.sh (novos)
-├── docs/MODS.md            contrato da ABI + tutorial "como escrever um Mod"
-├── PLAN.md                 este arquivo
-└── README.md               ganha seção VR na Fase 5
+│   ├── vr/                 mod_vr sources (C++, OpenXR loader, GL)
+│   └── null/               log-only Mod template (doc example + 2nd test Mod)
+├── scripts/                build-openxr.sh · build-mods.sh · run-cs-vr.sh (new)
+├── docs/MODS.md            ABI contract + "how to write a Mod" tutorial
+├── PLAN.md                 this file
+└── README.md               gains a VR section in Phase 5
 ```
 
 ---
 
-## 3. Fases e tarefas
+## 3. Phases and tasks
 
-Convenções:
-- Toda tarefa é **atômica**: uma responsabilidade, com critério de pronto verificável ("Pronto quando:").
-- Sem estimativas de tempo (decisão do time). Complexidade relativa indicada: 🟢 baixa · 🟡 média · 🔴 alta.
-- Cada fase termina com um **marcador** demonstrável antes de avançar.
+Conventions:
+- Every task is **atomic**: one responsibility, with a verifiable done criterion ("Done when:").
+- No time estimates (team decision). Relative complexity indicated: 🟢 low · 🟡 medium · 🔴 high.
+- Each phase ends with a demonstrable **milestone** before moving on.
 
-### Fase 0 — Infraestrutura VR (queimar o risco do transporte antes de codar o jogo)
+### Phase 0 — VR infrastructure (burn the transport risk before coding the game)
 
-> ✅ **CONCLUÍDA em 2026-10-11.** 0.1/0.2 puladas por decisão do usuário (WiVRn já
-> validado no ambiente). Detalhes: OpenXR-SDK **1.1.63** em `src/openxr-sdk/install/`
-> (loader dinâmico + headers); branches `vr-mod` criadas nos dois repos (base:
-> xash3d `590869d`, cs16-client `6a49bcc`); baseline flat em
-> `backups/flat-baseline-20261011/` (13 arquivos + `MANIFEST.sha256`); rebuild das
-> branches validado com boot + conexão ao dedicado; `docs/MODS.md` versionado.
-> Pegadinha resolvida: a imagem `steamcmd:latest` mudou de base e passou a linkar
-> `libbz2.so.1.0` (soname Ubuntu) — `build-xash.sh` normaliza para `libbz2.so.1`
-> (Fedora) com `patchelf` no pós-build.
+> ✅ **COMPLETED on 2026-10-11.** 0.1/0.2 skipped by user decision (WiVRn already
+> validated in the environment). Details: OpenXR-SDK **1.1.63** in `src/openxr-sdk/install/`
+> (dynamic loader + headers); `vr-mod` branches created in both repos (base:
+> xash3d `590869d`, cs16-client `6a49bcc`); flat baseline in
+> `backups/flat-baseline-20261011/` (13 files + `MANIFEST.sha256`); rebuild of the
+> branches validated with boot + connection to the dedicated server; `docs/MODS.md` versioned.
+> Gotcha solved: the `steamcmd:latest` image changed base and started linking
+> `libbz2.so.1.0` (Ubuntu soname) — `build-xash.sh` normalizes to `libbz2.so.1`
+> (Fedora) with `patchelf` in the post-build.
 
-- [x] 🟢 **0.1** *(pulado — WiVRn já funciona no ambiente, pelo usuário)* Instalar WiVRn via Flatpak *user* (`io.github.wivrn.wivrn`) e instalar o client no Quest 3 pelo wizard do dashboard. *Pronto quando:* headset conecta, mostra a tela virtual e **reproduz o áudio do PC no óculos**.
-- [x] 🟢 **0.2** *(pulado — WiVRn já funciona no ambiente, pelo usuário)* Rodar um app OpenXR de teste independente (hello_xr ou equivalente, backend GL) contra o runtime do WiVRn. *Pronto quando:* cena estéreo visível no headset com head tracking — prova o combo Fedora + RTX 4060 + WiVRn + GL.
-- [x] 🟡 **0.3** Criar `scripts/build-openxr.sh` (rootless): baixar e buildar OpenXR-SDK (loader + headers), no container podman ou vendored. *Pronto quando:* `libopenxr_loader.so` + headers disponíveis para link.
-- [x] 🟢 **0.4** Criar branch `vr-mod` em `src/xash3d-fwgs` e `src/cs16-client`; salvar baseline dos binários flat atuais (`.so` + `xash3d`). *Pronto quando:* build da branch `vr-mod` sem alterações reproduz o jogo flat funcional (smoke test).
-- [x] 🟢 **0.5** Criar esqueleto de `docs/MODS.md` e registrar a decisão de ABI (struct versionada + dlopen + capabilities). *Pronto quando:* documento commitado na branch.
+- [x] 🟢 **0.1** *(skipped — WiVRn already works in the environment, per the user)* Install WiVRn via Flatpak *user* (`io.github.wivrn.wivrn`) and install the client on the Quest 3 through the dashboard wizard. *Done when:* headset connects, shows the virtual screen and **plays the PC audio in the headset**.
+- [x] 🟢 **0.2** *(skipped — WiVRn already works in the environment, per the user)* Run an independent OpenXR test app (hello_xr or equivalent, GL backend) against the WiVRn runtime. *Done when:* stereo scene visible in the headset with head tracking — proves the Fedora + RTX 4060 + WiVRn + GL combo.
+- [x] 🟡 **0.3** Create `scripts/build-openxr.sh` (rootless): download and build the OpenXR-SDK (loader + headers), in the podman container or vendored. *Done when:* `libopenxr_loader.so` + headers available for linking.
+- [x] 🟢 **0.4** Create branch `vr-mod` in `src/xash3d-fwgs` and `src/cs16-client`; save a baseline of the current flat binaries (`.so` + `xash3d`). *Done when:* build of the `vr-mod` branch without changes reproduces the functional flat game (smoke test).
+- [x] 🟢 **0.5** Create the skeleton of `docs/MODS.md` and record the ABI decision (versioned struct + dlopen + capabilities). *Done when:* document committed on the branch.
 
-**Marcador da fase:** transporte Quest 3 ↔ Fedora provado ponta a ponta, sem root, com um app que não é o nosso.
+**Phase milestone:** Quest 3 ↔ Fedora transport proven end to end, rootless, with an app that is not ours.
 
-### Fase 1 — Loader de Mods no engine (fundação da arquitetura)
+### Phase 1 — Mod loader in the engine (foundation of the architecture)
 
-> ✅ **CONCLUÍDA em 2026-10-11.** Commit `8d12c80` na branch `vr-mod` do xash3d-fwgs;
-> template em `mods/null/`; contrato v1 congelado em `docs/MODS.md`.
-> Descoberta de arquitetura: `COM_LoadLibrary`/`FS_FindLibrary` força **lowercase** no
-> path da biblioteca (`// always in lower case (why?)` em `filesystem/searchpath.c`) —
-> o loader de Mods usa `dlopen` direto (POSIX) e valida o path com `stat`, resolvendo o
-> diretório do binário via `/proc/self/exe` (case garantido). Mod loga em arquivo próprio
-> (`game/mods/mod_null.log`) porque o `Con_Printf` do engine não vai para stdout em modo
-> gráfico (o canal confiável de log é `-log <arquivo>`, que exige path iniciando com alfanumérico).
-> Descoberta de conteúdo: os `+comandos` da linha de comando (`+connect` etc.) só rodam se um
-> `.rc` invocar `stuffcmds` — `valve/valve.rc` cobre o HL, mas o CS do HLDS não traz `cstrike.rc`;
-> criamos `game/cstrike/cstrike.rc`. Logging do dedicado ligado (`log on` no `server.cfg`) —
-> sem isso nenhum join/drop aparece em lugar nenhum (stdout do HLDS é bufferizado).
+> ✅ **COMPLETED on 2026-10-11.** Commit `8d12c80` on the xash3d-fwgs `vr-mod` branch;
+> template in `mods/null/`; contract v1 frozen in `docs/MODS.md`.
+> Architecture discovery: `COM_LoadLibrary`/`FS_FindLibrary` forces **lowercase** on the
+> library path (`// always in lower case (why?)` in `filesystem/searchpath.c`) —
+> the Mod loader uses `dlopen` directly (POSIX) and validates the path with `stat`, resolving the
+> binary directory via `/proc/self/exe` (case guaranteed). Mod logs to its own file
+> (`game/mods/mod_null.log`) because the engine's `Con_Printf` does not go to stdout in
+> graphics mode (the reliable log channel is `-log <file>`, which requires a path starting with an alphanumeric).
+> Content discovery: the command-line `+commands` (`+connect` etc.) only run if a
+> `.rc` invokes `stuffcmds` — `valve/valve.rc` covers HL, but the HLDS CS does not ship `cstrike.rc`;
+> we created `game/cstrike/cstrike.rc`. Dedicated logging turned on (`log on` in `server.cfg`) —
+> without it no join/drop shows up anywhere (HLDS stdout is buffered).
 
-- [x] 🟡 **1.1** Escrever `common/mod_api.h` v1 (contrato da seção 2.3: structs, hooks, capabilities). *Pronto quando:* header compila standalone e é consumido por um stub. — compilou com `-Wall -Wextra` no `mods/null`.
-- [x] 🟡 **1.2** Implementar o loader no engine (`engine/common/modloader.c`): parse de `-mod <nome>`, `dlopen("mod_<nome>.so")`, resolve `ModGetAPI`, valida `api_version`, guarda globals; unload limpo no shutdown. *Pronto quando:* `-mod null` carrega e descarrega sem crash, com log claro. — validado em modo dedicado (stdout) com ciclo completo load→init→frames→unload.
-- [x] 🟡 **1.3** Inserir call sites de hooks nos pontos neutros do host: início/fim de frame, pré-setup de câmera (por olho), pós-desenho de HUD, fila de input, criação do contexto GL. *Pronto quando:* cada call site é no-op sem Mod carregado. — `host.c` (frame/input/shutdown/init), `cl_scrn.c` (begin/hud/end), `cl_view.c` (câmera por view pass), `vid_sdl2.c` (video init).
-- [x] 🟢 **1.4** Implementar o Mod `null` (template): loga cada hook com contadores e timestamp. *Pronto quando:* 10+ min de jogo flat com `-mod null`, sem crash e sem alteração de gameplay; vira exemplo do `MODS.md`. — teste longo de 10,5 min conectado ao dedicado.
-- [x] 🟢 **1.5** Regressão flat: comparar comportamento sem `-mod` vs baseline (Fase 0.4) e com `-mod null`. *Pronto quando:* zero diferença funcional. — boot + connect sem `-mod` após as mudanças, idêntico ao baseline funcional.
+- [x] 🟡 **1.1** Write `common/mod_api.h` v1 (contract from section 2.3: structs, hooks, capabilities). *Done when:* header compiles standalone and is consumed by a stub. — compiled with `-Wall -Wextra` on `mods/null`.
+- [x] 🟡 **1.2** Implement the loader in the engine (`engine/common/modloader.c`): parse `-mod <name>`, `dlopen("mod_<name>.so")`, resolve `ModGetAPI`, validate `api_version`, store globals; clean unload on shutdown. *Done when:* `-mod null` loads and unloads without a crash, with clear logging. — validated in dedicated mode (stdout) with a full load→init→frames→unload cycle.
+- [x] 🟡 **1.3** Insert hook call sites at the host's neutral points: frame start/end, camera pre-setup (per eye), post-HUD draw, input queue, GL context creation. *Done when:* each call site is a no-op without a Mod loaded. — `host.c` (frame/input/shutdown/init), `cl_scrn.c` (begin/hud/end), `cl_view.c` (camera per view pass), `vid_sdl2.c` (video init).
+- [x] 🟢 **1.4** Implement the `null` Mod (template): logs each hook with counters and timestamp. *Done when:* 10+ min of flat gameplay with `-mod null`, no crash and no gameplay change; becomes the `MODS.md` example. — long 10.5 min test connected to the dedicated server.
+- [x] 🟢 **1.5** Flat regression: compare behavior without `-mod` vs baseline (Phase 0.4) and with `-mod null`. *Done when:* zero functional difference. — boot + connect without `-mod` after the changes, identical to the functional baseline.
 
-**Marcador da fase:** o Mod `null` prova que a arquitetura é genérica — nada nela é VR-específico.
+**Phase milestone:** the `null` Mod proves the architecture is generic — nothing in it is VR-specific.
 
-### Fase 2 — VR core no mod_vr (sessão OpenXR + render estéreo)
+### Phase 2 — VR core in mod_vr (OpenXR session + stereo render)
 
-> ✅ **IMPLEMENTADA em 2026-10-11 — código completo e testado sem headset; a validação
-> final em estéreo exige o Quest 3 conectado (WiVRn).** Commit do engine na branch
-> `vr-mod` (ABI v2 + loop de olhos + flag de viewport); mod em `mods/vr/` +
+> ✅ **IMPLEMENTED on 2026-10-11 — code complete and tested without a headset; the final
+> stereo validation requires the Quest 3 connected (WiVRn).** Engine commit on the
+> `vr-mod` branch (ABI v2 + eye loop + viewport flag); mod in `mods/vr/` +
 > `scripts/run-cs-vr.sh`.
 >
-> Descobertas desta fase (todas documentadas no código):
-> - O WiVRn 26.9 (RPM) só aceita `xrCreateInstance` de API **1.1** (1.0 → `-51`) e **bloqueia
->   para sempre** sem headset conectado (o `hello_xr` do sistema trava do mesmo jeito) → o
->   init do OpenXR roda em **thread separada com timeout de 6 s**; o jogo fica flat e a VR
->   "liga sozinha" quando o headset conectar. Runtime manifest: `/usr/share/openxr/1/openxr_wivrn.json`.
-> - O `ref_gl` tem um *scene target* interno (`r_scene_scale`/MSAA) que rebinda FBO por cima
->   do nosso — desligado por cvars no launcher; e o math do viewport assume viewport ⊆ janela
->   → novo flag `RF_VIEWPORT_ABSOLUTE` (`ref_params.h`) com branch no `R_SetupGL` (patch mínimo).
-> - Ubuntu linka com `--as-needed`: na linkagem do mod, o fonte vem ANTES das `-l`; e
->   `ModGetAPI` em C++ precisa de `extern "C"`.
-> - Fallback do 2.5 em vigor: FOV simétrico = máx por eixo no render; o **submit** usa o
->   FOV assimétrico real por olho (compositor não distorce).
-> - O **swap acontece dentro do `V_PostRender`** (`R_EndFrame` → `GL_SwapBuffers`), ou
->   seja, muito antes do `Mod_EndFrame` (fim do `SCR_UpdateScreen`): desenhar no
->   `Mod_EndFrame` cai no back buffer pós-swap e nunca aparece. Overlay 2D de verdade
->   precisa de um ponto próprio logo antes do `R_EndFrame` → **`Mod_Overlay2D` (ABI v3,
->   `MOD_CAP_HUD`, tarefa 2.9)**. Também por isso o `Mod_AfterEyes` (pré-2D) serve só
->   para o espelho: o HUD do jogo desenha por cima dele.
+> Discoveries this phase (all documented in the code):
+> - WiVRn 26.9 (RPM) only accepts `xrCreateInstance` of API **1.1** (1.0 → `-51`) and **blocks
+>   forever** without a connected headset (the system's `hello_xr` hangs the same way) → the
+>   OpenXR init runs on a **separate thread with a 6 s timeout**; the game stays flat and VR
+>   "turns itself on" when the headset connects. Runtime manifest: `/usr/share/openxr/1/openxr_wivrn.json`.
+> - `ref_gl` has an internal *scene target* (`r_scene_scale`/MSAA) that rebinds an FBO over
+>   ours — turned off via cvars in the launcher; and the viewport math assumes viewport ⊆ window
+>   → new flag `RF_VIEWPORT_ABSOLUTE` (`ref_params.h`) with a branch in `R_SetupGL` (minimal patch).
+> - Ubuntu links with `--as-needed`: when linking the mod, the source comes BEFORE the `-l`; and
+>   `ModGetAPI` in C++ needs `extern "C"`.
+> - The 2.5 fallback in effect: symmetric FOV = max per axis in the render; the **submit** uses the
+>   real asymmetric FOV per eye (compositor does not distort).
+> - The **swap happens inside `V_PostRender`** (`R_EndFrame` → `GL_SwapBuffers`), that
+>   is, long before `Mod_EndFrame` (end of `SCR_UpdateScreen`): drawing in
+>   `Mod_EndFrame` lands in the post-swap back buffer and never appears. A real 2D overlay
+>   needs its own point just before `R_EndFrame` → **`Mod_Overlay2D` (ABI v3,
+>   `MOD_CAP_HUD`, task 2.9)**. That is also why `Mod_AfterEyes` (pre-2D) serves only
+>   the mirror: the game HUD draws over it.
 
-- [x] 🟡 **2.1** Esqueleto do mod_vr: instance/session OpenXR contra o WiVRn (via `XR_RUNTIME_JSON`), reference space `LOCAL`, spaces de head e hands. *Pronto quando:* log confirma sessão criada e poses chegando (sem render). — log em `game/mods/mod_vr.log`; poses exigem headset.
-- [x] 🟡 **2.2** Frame loop OpenXR (`xrWaitFrame` → `xrBeginFrame` → `xrLocateViews` → `xrEndFrame`) acoplado a `Mod_FramePre/Post`, com pacing pelo `predictedDisplayTime`. *Pronto quando:* loop estável no refresh do HMD (72/90 Hz). — código pronto; estabilidade no HMD pendente de headset.
-- [x] 🔴 **2.3** Swapchains GL por olho (`XR_KHR_opengl_enable`): criar swapchains, FBO por image, bind no hook de câmera. *Pronto quando:* cor de clear distinta por olho visível no headset. — código pronto (`VR_DEBUG_CLEAR=1` pinta olhos de azul/vermelho p/ teste).
-- [x] 🔴 **2.4** Camera override + render duplo: origem/ângulos do HMD → view do engine, cena desenhada **2× por frame** (um por olho), offsets apenas de render (física/prediction intocadas). Desligar paths desktop: vsync de janela. *Pronto quando:* em pé no mapa, olhar 1:1. — eye loop no `V_RenderView` (`Mods_EyeCount`), áudio só no olho 0; pendente de headset.
-- [x] 🔴 **2.5** Projeção por olho: fallback do MVP em vigor (FOV simétrico = máx por eixo; submit assimétrico real). *Pronto quando:* estéreo confortável, sem clipping grave. — pendente de headset; injeção de matriz assimétrica no ref_gl fica pro pós-MVP.
-- [x] 🟡 **2.6** Submit + mirror: `xrEndFrame` com projection layers; espelho do olho esquerdo na janela via `Mod_AfterEyes` (blit antes do 2D — monitor mostra vista + HUD flat). — pendente de headset p/ submit real.
-- [x] 🟢 **2.7** `VR_RESOLUTION_SCALE` (0.3–3.0, default 1.0) via env. *Pronto quando:* escala default sustenta refresh estável na RTX 4060. — medição de fps no HMD pendente de headset.
-- [ ] 🟡 **2.8** (Condicional) Foveação fixa via extensão FB, se o WiVRn expuser. *Pronto quando:* ganho mensurável de margem de performance. — não tentada (condicional; sem headset não há como medir).
-- [x] 🟢 **2.9** **Painel de debug na tela 2D** (2026-10-12): FPS + todo erro/aviso do carregamento do VR, visível **só no monitor** e só quando o jogo roda com `-mod vr`. Exigiu a ABI **v3** (`Mod_Overlay2D`, capability `MOD_CAP_HUD`), chamado no fim do `V_PostRender` — depois do HUD/menus e antes do swap, o único ponto em que um Mod pinta por cima da UI (e, no VR, fora das swapchains dos olhos). Fonte bitmap 8x16 embutida (`mods/vr/gen_font.py` → `vr_font.h`); `VR_DEBUG_PANEL=0` esconde, `VR_PANEL_DUMP=saida.ppm` salva um quadro para diagnóstico. *Pronto quando:* com o VR falhando (sem runtime/headset) o painel mostra o `XrResult` traduzido, o runtime e o motivo do fallback flat. — validado sem headset (dump conferido: painel por cima do menu, 1 erro + 1 aviso detalhados).
-- [x] 🔴 **2.10** **Correções para o VR subir de verdade com o WiVRn** (2026-10-12): o painel de 2.9 mostrou que o caminho VR nunca havia rodado de ponta a ponta. Três causas raiz, todas corrigidas no `mod_vr.cpp` + launcher:
-  (a) **driver de vídeo**: numa sessão Wayland o SDL abria no driver `wayland` (EGL) e não existe contexto GLX — o mod é Xlib/GLX, então `run-cs-vr.sh` agora exporta `SDL_VIDEODRIVER=x11` (XWayland serve);
-  (b) **requisitos gráficos**: faltava `xrGetOpenGLGraphicsRequirementsKHR`, obrigatória antes de `xrCreateSession` com `XR_KHR_opengl_enable` — sem ela o WiVRn devolve `-50 XR_ERROR_GRAPHICS_REQUIREMENTS_CALL_MISSING`;
-  (c) **thread do contexto**: o client compositor do runtime faz `glXMakeCurrent` na thread que cria a sessão, mas a sessão era criada na thread de init (o contexto GL pertence à main thread) → `XR_ERROR_INITIALIZATION_FAILED`. Agora só o `xrCreateInstance` (que bloqueia sem headset) roda fora; `xrGetSystem`/requisitos/sessão/reference space rodam na main thread, com retry de 1 em 1 s (headset conectado depois = VR liga sozinha).
-  Também corrigidos de passagem: `glXQueryContext` devolve **0 em sucesso** (a checagem estava invertida e o binding saía com `visual 0`/`fbconfig nulo`), formato de swapchain passou a ser escolhido da lista do runtime (era `0`, inválido), e o aviso de "2 wivrn-server" do launcher não confunde mais o pai com o worker.
-  *Pronto quando:* a inicialização chega a `xrBeginSession` + swapchains por olho com o runtime WiVRn. — **validado até swapchains** sem headset (`sessão READY`, `xrBeginSession`, 2476x2594 por olho, RGBA8, 0 erros no painel); falta confirmar o estéreo com o Quest 3 conectado.
-- [x] 🔴 **2.11** **HMD preto mesmo com tudo inicializado** (2026-10-12): com o Quest 3 ligado a sessão ficava presa em `READY` e o headset mostrava preto, sem erro em lugar nenhum. Causa: **faltava o bombeamento de frames**. O app só chamava `xrWaitFrame`/`xrBeginFrame` em `VISIBLE/FOCUSED`, mas o OpenXR exige que ele continue rodando o frame loop já em `SYNCHRONIZED` (submetendo quadro vazio, `layerCount 0`) — sem isso o runtime não avança e nunca entrega VISIBLE. Corrigido com `xr_session_begun` (ligado no `xrBeginSession`, desligado em STOPPING/LOSS): o loop bombeia a partir do begin e só renderiza nos olhos quando VISIBLE/FOCUSED. Verificado com o headset conectado: `READY → SYNCHRONIZED → VISIBLE → FOCUSED`, dois olhos renderizados, `xrEndFrame` com `camadas=1` e conteúdo real nos olhos.
-- [x] 🟢 **2.12** **Diagnóstico do pipeline estéreo** (2026-10-12): como o HMD preto não deixa rastro, o Mod agora mede e registra o que importa: completude do FBO de cada olho (`glCheckFramebufferStatus`), binding do FBO depois do render dos olhos, **leitura de pixels da imagem da swapchain** (com conteúdo = o render aconteceu; preto = o problema é o render), `xrEndFrame` com o número de camadas e o resultado, `xrLocateViews` (flags das poses) e erros de GL agregados. Traços dos primeiros 12 frames do estéreo (`VR_TRACE=1` mantém ligado); avisos a cada ~5 s dizendo *onde* parou ("ainda nao VISIBLE" vs "sem render 3D nos olhos"). `VR_PANEL_DUMP_AT=<s>` escolhe o atraso do dump. *Lição registrada:* o engine **não tem rampa de gama de hardware** (não existe `SetWindowGammaRamp` no código), então o que está no framebuffer é o que o monitor mostra — não há diferença de gama entre espelho e HMD.
-- [x] 🟢 **2.13** **Desempenho: o loop estava preso no vsync do monitor** (2026-10-12): com o VR já funcionando, o jogo travava e apareciam **áreas pretas nas partes novas do mapa ao virar a cabeça**. A medição (`perf`, uma linha por segundo com trabalho por frame vs período do HMD) mostrou o quadro exato do problema: **60 fps (16,7 ms) contra um HMD a 90 Hz (11,1 ms)** — 1 de cada 3 quadros do headset chegava sem conteúdo novo, e é justamente isso que deixa preto o que acaba de entrar no campo de visão. Causa: o `-gl_vsync 0` do launcher **não segurava** (a forma `-cvar` é aplicada antes dos configs e o `config.cfg` do jogador religa o vsync), então a troca de buffers da JANELA travava o loop inteiro — engine + VR — no refresh do monitor. Correção de uma linha no `run-cs-vr.sh`: passar por **comando de console** (`+gl_vsync 0 +fps_max 200 +r_scene_scale 1 +gl_msaa 0 +r_speeds 0`), que roda depois dos configs. Medido: **60 → 90 fps**, casando com o período do HMD. Folga verificada com `VR_RESOLUTION_SCALE`: 1.0 (2476x2594/olho) = 1,5 ms de trabalho; 1.3 = 1,9 ms; 1.6 (3961x4150/olho) = 2,4 ms — ou seja, sobra orçamento para subir a resolução se quiser nitidez, e há margem para descer se a GPU/encoder não acompanhar.
+- [x] 🟡 **2.1** mod_vr skeleton: OpenXR instance/session against WiVRn (via `XR_RUNTIME_JSON`), reference space `LOCAL`, head and hand spaces. *Done when:* log confirms session created and poses arriving (without render). — log in `game/mods/mod_vr.log`; poses require a headset.
+- [x] 🟡 **2.2** OpenXR frame loop (`xrWaitFrame` → `xrBeginFrame` → `xrLocateViews` → `xrEndFrame`) coupled to `Mod_FramePre/Post`, with pacing by `predictedDisplayTime`. *Done when:* loop stable at the HMD refresh (72/90 Hz). — code ready; HMD stability pending a headset.
+- [x] 🔴 **2.3** Per-eye GL swapchains (`XR_KHR_opengl_enable`): create swapchains, FBO per image, bind in the camera hook. *Done when:* distinct clear color per eye visible in the headset. — code ready (`VR_DEBUG_CLEAR=1` paints the eyes blue/red for testing).
+- [x] 🔴 **2.4** Camera override + double render: HMD origin/angles → engine view, scene drawn **2× per frame** (one per eye), render-only offsets (physics/prediction untouched). Turn off desktop paths: window vsync. *Done when:* standing in the map, 1:1 look. — eye loop in `V_RenderView` (`Mods_EyeCount`), audio only on eye 0; pending a headset.
+- [x] 🔴 **2.5** Per-eye projection: MVP fallback in effect (symmetric FOV = max per axis; real asymmetric submit). *Done when:* comfortable stereo, no severe clipping. — pending a headset; asymmetric matrix injection in ref_gl is left for post-MVP.
+- [x] 🟡 **2.6** Submit + mirror: `xrEndFrame` with projection layers; left-eye mirror to the window via `Mod_AfterEyes` (blit before 2D — monitor shows the view + flat HUD). — pending a headset for real submit.
+- [x] 🟢 **2.7** `VR_RESOLUTION_SCALE` (0.3–3.0, default 1.0) via env. *Done when:* the default scale sustains stable refresh on the RTX 4060. — fps measurement on the HMD pending a headset.
+- [ ] 🟡 **2.8** (Conditional) Fixed foveation via the FB extension, if WiVRn exposes it. *Done when:* measurable gain in performance headroom. — not attempted (conditional; without a headset there is no way to measure).
+- [x] 🟢 **2.9** **Debug panel on the 2D screen** (2026-10-12): FPS + every error/warning from the VR load, visible **only on the monitor** and only when the game runs with `-mod vr`. It required ABI **v3** (`Mod_Overlay2D`, capability `MOD_CAP_HUD`), called at the end of `V_PostRender` — after the HUD/menus and before the swap, the only point where a Mod paints over the UI (and, in VR, outside the eye swapchains). Embedded 8x16 bitmap font (`mods/vr/gen_font.py` → `vr_font.h`); `VR_DEBUG_PANEL=0` hides it, `VR_PANEL_DUMP=saida.ppm` saves a frame for diagnosis. *Done when:* with VR failing (no runtime/headset) the panel shows the translated `XrResult`, the runtime and the reason for the flat fallback. — validated without a headset (dump checked: panel over the menu, 1 error + 1 warning detailed).
+- [x] 🔴 **2.10** **Fixes for VR to actually come up with WiVRn** (2026-10-12): the 2.9 panel showed that the VR path had never run end to end. Three root causes, all fixed in `mod_vr.cpp` + launcher:
+  (a) **video driver**: in a Wayland session SDL opened on the `wayland` driver (EGL) and there is no GLX context — the mod is Xlib/GLX, so `run-cs-vr.sh` now exports `SDL_VIDEODRIVER=x11` (XWayland serves);
+  (b) **graphics requirements**: `xrGetOpenGLGraphicsRequirementsKHR` was missing, mandatory before `xrCreateSession` with `XR_KHR_opengl_enable` — without it WiVRn returns `-50 XR_ERROR_GRAPHICS_REQUIREMENTS_CALL_MISSING`;
+  (c) **context thread**: the runtime's client compositor does `glXMakeCurrent` on the thread that creates the session, but the session was created on the init thread (the GL context belongs to the main thread) → `XR_ERROR_INITIALIZATION_FAILED`. Now only `xrCreateInstance` (which blocks without a headset) runs outside; `xrGetSystem`/requirements/session/reference space run on the main thread, with a retry every 1 s (headset connected later = VR turns itself on).
+  Also fixed in passing: `glXQueryContext` returns **0 on success** (the check was inverted and the binding came out with `visual 0`/null `fbconfig`), the swapchain format now gets chosen from the runtime's list (it was `0`, invalid), and the launcher's "2 wivrn-server" warning no longer confuses the parent with the worker.
+  *Done when:* initialization reaches `xrBeginSession` + per-eye swapchains with the WiVRn runtime. — **validated up to swapchains** without a headset (`sessão READY`, `xrBeginSession`, 2476x2594 per eye, RGBA8, 0 errors in the panel); still to confirm stereo with the Quest 3 connected.
+- [x] 🔴 **2.11** **Black HMD even with everything initialized** (2026-10-12): with the Quest 3 on, the session stayed stuck in `READY` and the headset showed black, with no error anywhere. Cause: **frame pumping was missing**. The app only called `xrWaitFrame`/`xrBeginFrame` in `VISIBLE/FOCUSED`, but OpenXR requires it to keep running the frame loop already in `SYNCHRONIZED` (submitting an empty frame, `layerCount 0`) — without that the runtime does not advance and never delivers VISIBLE. Fixed with `xr_session_begun` (set on `xrBeginSession`, cleared on STOPPING/LOSS): the loop pumps from the begin and only renders the eyes when VISIBLE/FOCUSED. Verified with the headset connected: `READY → SYNCHRONIZED → VISIBLE → FOCUSED`, two eyes rendered, `xrEndFrame` with `camadas=1` (layers=1) and real content in the eyes.
+- [x] 🟢 **2.12** **Stereo pipeline diagnosis** (2026-10-12): since the black HMD leaves no trace, the Mod now measures and logs what matters: completeness of each eye's FBO (`glCheckFramebufferStatus`), FBO binding after the eye render, **pixel readback of the swapchain image** (with content = the render happened; black = the problem is the render), `xrEndFrame` with the layer count and the result, `xrLocateViews` (pose flags) and aggregated GL errors. Traces of the first 12 stereo frames (`VR_TRACE=1` keeps it on); warnings every ~5 s saying *where* it stopped ("ainda nao VISIBLE" [not VISIBLE yet] vs "sem render 3D nos olhos" [no 3D render in the eyes]). `VR_PANEL_DUMP_AT=<s>` chooses the dump delay. *Lesson recorded:* the engine **has no hardware gamma ramp** (there is no `SetWindowGammaRamp` in the code), so what is in the framebuffer is what the monitor shows — there is no gamma difference between mirror and HMD.
+- [x] 🟢 **2.13** **Performance: the loop was stuck on the monitor vsync** (2026-10-12): with VR already working, the game stuttered and **black areas appeared in the new parts of the map when turning the head**. The measurement (`perf`, one line per second with work per frame vs HMD period) showed the exact picture of the problem: **60 fps (16.7 ms) against a 90 Hz HMD (11.1 ms)** — 1 out of every 3 headset frames arrived without new content, and that is exactly what turns black whatever has just entered the field of view. Cause: the launcher's `-gl_vsync 0` **did not hold** (the `-cvar` form is applied before the configs and the player's `config.cfg` turns vsync back on), so the WINDOW buffer swap stalled the entire loop — engine + VR — at the monitor refresh. One-line fix in `run-cs-vr.sh`: pass it as a **console command** (`+gl_vsync 0 +fps_max 200 +r_scene_scale 1 +gl_msaa 0 +r_speeds 0`), which runs after the configs. Measured: **60 → 90 fps**, matching the HMD period. Headroom verified with `VR_RESOLUTION_SCALE`: 1.0 (2476x2594/eye) = 1.5 ms of work; 1.3 = 1.9 ms; 1.6 (3961x4150/eye) = 2.4 ms — that is, there is budget left to raise the resolution if you want sharpness, and margin to lower it if the GPU/encoder cannot keep up.
 
-- [x] 🔴 **2.14** **Estéreo errado: o par não fundia ("cada olho sozinho parece ok, os dois juntos não")** (2026-10-12). Três causas somadas, todas medidas com o Quest 3 conectado:
+- [x] 🔴 **2.14** **Wrong stereo: the pair would not fuse ("each eye alone looks ok, the two together do not")** (2026-10-12). Three combined causes, all measured with the Quest 3 connected:
 
-  1. **Frustum assimétrico por olho** (a maior). O runtime declara, por olho, quatro ângulos independentes e espelhados — no Quest 3 via WiVRn: esquerdo `L54 R40 U44 D55`, direito `L40 R54 U44 D55`. São 94°×99° **fora de centro** (assimetria ±14° na horizontal, 11° na vertical, com sinal trocado entre os olhos). O engine só sabia montar frustum **centralizado** (`fov_x`/`fov_y`) e o mod só tinha isso: renderizava 54°×55° centrados e submetia 94°×99° assimétricos — o compositor esticava a imagem de cada olho por um fator **diferente**, e é exatamente isso que impede a fusão. Exigiu a **ABI v4**: `mod_view_t.fov_asym[4]`/`has_fov_asym` → `RF_FOV_ASYM` no `ref_viewpass_t` → projeção off-center em `R_SetupProjectionMatrix` (`Matrix4x4_CreateProjection` já aceitava limites assimétricos, o `ref` é que sempre passava simétricos).
-  2. **Rotação XR→GoldSrc espelhada.** O mapa `(x,y,z) → (-z, x, y)` tem determinante **−1**, e os dois espaços são **destros** (OpenXR: X direita/Y cima/Z trás; GoldSrc: X frente/Y esquerda/Z cima — conferido pelo `right × up = -forward` do `AngleVectors`). Logo o mapeamento era um **espelho**, não uma rotação: a cabeça girava para o lado errado (yaw com sinal trocado) e — pior para o estéreo — o eixo "direita" da cabeça saía invertido, jogando o offset dos olhos para o lado errado (par pseudo-escópico). O correto é `(-z, -x, y)`. Conferido numericamente contra o `AngleVectors`/modelview do engine (erro ~1e-4 em poses reais do WiVRn).
-  3. **IPD chutado.** O mod afastava as câmeras em 63 mm fixos; o headset reporta **68,3 mm** (com o IPD calibrado do usuário). Agora o offset sai da **posição real de cada olho** informada pelo runtime (delta entre os olhos, trazido para o referencial da cabeça): medido `(68,3 0,0 −0,0) mm` — separação pura ao longo da direita da cabeça, câmeras paralelas. `VR_IPD=<m>` força um valor manual.
+  1. **Asymmetric frustum per eye** (the biggest). The runtime declares, per eye, four independent and mirrored angles — on the Quest 3 via WiVRn: left `L54 R40 U44 D55`, right `L40 R54 U44 D55`. That is 94°×99° **off-center** (asymmetry ±14° horizontally, 11° vertically, with the sign flipped between the eyes). The engine only knew how to build a **centered** frustum (`fov_x`/`fov_y`) and the mod only had that: it rendered 54°×55° centered and submitted 94°×99° asymmetric — the compositor stretched each eye's image by a **different** factor, and that is exactly what prevents fusion. It required ABI **v4**: `mod_view_t.fov_asym[4]`/`has_fov_asym` → `RF_FOV_ASYM` in `ref_viewpass_t` → off-center projection in `R_SetupProjectionMatrix` (`Matrix4x4_CreateProjection` already accepted asymmetric bounds, it was the `ref` that always passed symmetric ones).
+  2. **Mirrored XR→GoldSrc rotation.** The map `(x,y,z) → (-z, x, y)` has determinant **−1**, and both spaces are **right-handed** (OpenXR: X right/Y up/Z back; GoldSrc: X forward/Y left/Z up — checked via `right × up = -forward` of `AngleVectors`). Therefore the mapping was a **mirror**, not a rotation: the head turned the wrong way (yaw with flipped sign) and — worse for stereo — the head's "right" axis came out inverted, throwing the eye offset to the wrong side (pseudoscopic pair). The correct one is `(-z, -x, y)`. Checked numerically against the engine's `AngleVectors`/modelview (~1e-4 error on real WiVRn poses).
+  3. **Guessed IPD.** The mod separated the cameras by a fixed 63 mm; the headset reports **68.3 mm** (with the user's calibrated IPD). Now the offset comes from the **real position of each eye** reported by the runtime (delta between the eyes, brought into the head reference frame): measured `(68,3 0,0 −0,0) mm` — pure separation along the head's right, parallel cameras. `VR_IPD=<m>` forces a manual value.
 
-  O **roll** da cabeça também passou a entrar (`atan2(-right.z, up.z)`), porque com frustum assimétrico o centro ótico sai do eixo da view e inclinar a cabeça deslocaria a imagem.
+  The head **roll** also started being applied (`atan2(-right.z, up.z)`), because with an asymmetric frustum the optical center leaves the view axis and tilting the head would shift the image.
 
-  *Verificação objetiva (`VR_STEREO_DUMP=pref` grava as duas imagens do MESMO quadro):* a paralaxe medida entre os olhos é **−632 px** contra **−600 px** previstos pela geometria declarada (a diferença de ~32 px é a paralaxe da cena, ~2,2 m de profundidade média); **disparidade vertical de 1 px**; correlação por região **0,93–0,97** (antes, com o render simétrico contra o submit assimétrico, não havia deslocamento único que alinhasse as duas imagens). O teste de espelho dá pico pior (0,32 em −1112 px), confirmando que o par não está espelhado. Ferramenta de medição descartável em `/tmp/pair_final.c`.
+  *Objective verification (`VR_STEREO_DUMP=pref` writes the two images of the SAME frame):* the parallax measured between the eyes is **−632 px** against **−600 px** predicted by the declared geometry (the ~32 px difference is the scene parallax, ~2.2 m average depth); **vertical disparity of 1 px**; per-region correlation **0.93–0.97** (before, with the symmetric render against the asymmetric submit, there was no single displacement that aligned the two images). The mirror test gives a worse peak (0.32 at −1112 px), confirming the pair is not mirrored. Disposable measurement tool in `/tmp/pair_final.c`.
 
-- [x] 🔴 **2.15** **O painel de debug (e o HUD do jogo) apareciam no headset, não no monitor** (2026-10-12). Causa: **o alvo do 2D no fim do frame não era a janela**. Com o VR ativo o frame termina com o FBO da imagem do último olho ligado — o `blit_mirror` do espelho salva e *devolve* o binding que encontrou — e o `R_Set2DMode(true)` chama `GL_BindScreenTarget()`, que **retornava sem bindar** quando não há render target interno (o caso do VR: `+r_scene_scale 1 +gl_msaa 0`). Resultado: painel de debug, HUD, menus e console eram desenhados DENTRO da imagem enviada ao compositor — 2D na tela errada, em um olho só e ainda deformado pelo warp do runtime. Duas correções: no engine, `GL_BindScreenTarget` passa a ligar a janela explicitamente quando não há target interno (`ref/gl/gl_fbo.c`); no mod, o painel liga a janela (FBO 0) por conta própria antes de pintar e devolve o binding depois. Diagnóstico permanente: se o 2D voltar a chegar com FBO ≠ 0 aparece `painel: o 2D chegou com FBO N ligado` no `mods/mod_vr.log`. *Efeito colateral desejado:* o HUD/menu do jogo também **deixam de vazar** para o HMD — o headset volta a mostrar só o mundo até a Fase 4.
+- [x] 🔴 **2.15** **The debug panel (and the game HUD) appeared in the headset, not on the monitor** (2026-10-12). Cause: **the 2D target at the end of the frame was not the window**. With VR active the frame ends with the last eye's image FBO bound — the mirror's `blit_mirror` saves and *restores* the binding it found — and `R_Set2DMode(true)` calls `GL_BindScreenTarget()`, which **returned without binding** when there is no internal render target (the VR case: `+r_scene_scale 1 +gl_msaa 0`). Result: debug panel, HUD, menus and console were drawn INSIDE the image sent to the compositor — 2D on the wrong screen, in one eye only and still distorted by the runtime warp. Two fixes: in the engine, `GL_BindScreenTarget` now binds the window explicitly when there is no internal target (`ref/gl/gl_fbo.c`); in the mod, the panel binds the window (FBO 0) on its own before painting and restores the binding afterward. Permanent diagnosis: if the 2D ever arrives again with FBO ≠ 0, `painel: o 2D chegou com FBO N ligado` (panel: the 2D arrived with FBO N bound) appears in `mods/mod_vr.log`. *Desired side effect:* the game HUD/menu also **stop leaking** into the HMD — the headset goes back to showing only the world until Phase 4.
 
-**Marcador da fase (maior risco técnico queimado):** *dust2 em estéreo, olhando ao redor, jogo 100% funcional por teclado/mouse.* → código completo e **estéreo geometricamente conferido**; falta a confirmação de conforto visual com o headset na cara (`scripts/run-cs-vr.sh` com o WiVRn conectado).
+**Phase milestone (biggest technical risk burned):** *dust2 in stereo, looking around, game 100% functional by keyboard/mouse.* → code complete and **stereo geometrically verified**; still missing the confirmation of visual comfort with the headset on the face (`scripts/run-cs-vr.sh` with WiVRn connected).
 
-### Fase 3 — Input VR (controles Quest)
+### Phase 3 — VR input (Quest controllers)
 
-> Decisões tomadas com o dono em 2026-10-12 antes de implementar: **mira pela
-> cabeça nesta fase** (arma na mão fica para depois), **só física do CS** (sem
-> modo voo/noclip; o eixo vertical usa o `upmove` do jogo e portanto só age onde
-> ele já age — água, espectador), **só snap turn** (sem giro suave) e
-> **roomscale ligado** (a posição real do HMD move a câmera; agachar de verdade
-> vira `IN_DUCK`).
+> Decisions made with the owner on 2026-10-12 before implementing: **aim by the
+> head in this phase** (weapon in the hand comes later), **CS physics only** (no
+> flight/noclip mode; the vertical axis uses the game's `upmove` and therefore only acts where
+> it already acts — water, spectator), **snap turn only** (no smooth turning) and
+> **roomscale on** (the real HMD position moves the camera; actually crouching
+> becomes `IN_DUCK`).
 
-- [x] 🟢 **3.1** Action set OpenXR: thumbsticks, triggers, squeeze, A/B/X/Y, menu, haptic em `/user/hand/*`; poses `aim` por mão. Implementado em `mods/vr/mod_vr.cpp` (seção "input VR"): action set `gameplay`, 14 ações, espaços de pose por mão e bindings sugeridos para `oculus/touch_controller`, `meta/touch_controller_plus` e o fallback `khr/simple_controller` (erro por perfil é tolerado e logado). `xrAttachSessionActionSets` roda no fim do `xr_setup_session`, ou seja **antes** do `xrBeginSession`. *Pronto quando:* o bloco `INPUT` do painel mostrar o perfil de interação por mão — é ele que responde "o controle casou?" (se vier `(nenhum)`, nenhum binding pegou).
-- [x] 🟡 **3.2** Locomoção: stick esquerdo → forward/side **relativo ao yaw da cabeça**, com deadzone radial (que é *piso*, não degrau: o resto da faixa é reescalado) e `walk` segurando grip (`cl_movespeedkey`, o mesmo fator do `+speed`). A orientação pela cabeça não custa conta no Mod: ele injeta o **yaw do HMD** como `viewangles_abs` e manda o stick cru — o `pm_shared` monta o `wishdir` com `AngleVectors(cmd.viewangles)` e ignora o pitch no chão. Com o stick centrado o teclado continua valendo (ver 3.7). *Pronto quando:* andar/strafe no jogo só com o controle.
-- [x] 🟡 **3.3** Snap turn: stick direito horizontal → passo de `VR_TURN_SNAP_ANGLE` (padrão 30°), com **latch** por lado (dispara uma vez e só re-arma quando o stick volta a |x| < 0,3, senão giraria em rajada com o stick segurado). **Desvio do plano original:** não é via rotação do reference space — é um **offset de yaw** somado à pose do HMD, aplicado **igualmente no cmd e no render** (`IN_ModAppendMove` e `VR_Camera`). Sem essa simetria o corpo atiraria para um lado e a câmera olharia para o outro depois do primeiro passo; e o offset é o que também dá sentido ao offset de roomscale (o mundo é o playspace rodado do offset). O botão menu **recentra** (zera o offset, recalibra a altura) e o evento `REFERENCE_SPACE_CHANGE_PENDING` do runtime reancora sozinho — sem ele um recenter do headset teleportaria o jogador. *Pronto quando:* virar em passos sem drift e sem precisar de recenter constante.
-- [x] 🟡 **3.4** Botões → ações do jogo, injetados pela rota de input do engine: trigger direito/esquerdo = fogo/ataque secundário, A = pulo, B = reload, X = use, Y = **placar** (segurar) e click do stick esquerdo = agachar (além do agachar físico). **Dois desvios do plano, deliberados:** `Y = lanterna` virou placar e `menu = ESC virtual` virou **recentrar** — abrir o menu do jogo seria inútil agora, porque **o 2D ainda sai no monitor, não no headset** (isso é a Fase 4); recentrar, sim, é necessário justamente por causa do snap turn. Mapear isso é uma linha quando a Fase 4 chegar. *Pronto quando:* todas as ações executam na partida.
-- [x] 🟢 **3.5** Mira pela cabeça: `viewangles_abs` = pose do HMD, com pitch travado em ±89 (mesma trava do `CL_CreateMove` do cliente — o render pode olhar mais longe, o que vai ao servidor não). O `roll` do cmd fica 0 de propósito: o jogo ignora roll e o roll do render vem do `Mod_Camera`, que continua sendo a única fonte visual. *Pronto quando:* acertar alvos fixos e móveis de forma consistente — **e o teste decisivo, que também prova a rota de rede: atirar numa parede e o furo aparecer onde se olha.**
-- [ ] 🟢 **3.6** (Opcional, cortável) Haptic curto ao atirar. A ação de vibração **já existe e está bindada** (`/user/hand/*/output/haptic`), mas `xrApplyHapticFeedback` ainda não é chamado — falta só ligar.
-- [x] 🟢 **3.7** (Novo, saiu do desenho) **ABI v5 e aplicação no engine.** O `MOD_CAP_INPUT` existia desde a v1 mas era inerte (`Mods_Input` descartava a resposta). A v5 acrescentou `move_up`/`viewangles_abs`/`has_viewangles_abs` e ligou a aplicação: `IN_ModAppendMove` roda no `CL_CreateCmd` **depois** do client DLL (por isso o Mod vence o mouse sem desligá-lo, e o mouse segue navegando menus) e **antes** do `CL_PredictMovement`. Detalhes em `docs/MODS.md` §"Input". Regressão flat garantida por construção: fora de sessão ativa o Mod devolve a amostra zerada e o jogo fica idêntico ao de antes.
-- [x] 🟢 **3.8** (Novo) **Roomscale e agachar físico.** A posição do HMD entra na câmera como offset **horizontal** (rotacionado pelo offset de snap, limitado por `VR_ROOMSCALE_MAX`) — inclinar-se funciona. O eixo **vertical não** entra na câmera: a queda da cabeça além de `VR_CROUCH_DROP` (com histerese) vira `MOD_BTN_CROUCH`, e quem baixa a vista é o duck do jogo. É de propósito — somar os dois rebaixaria a vista duas vezes. `VR_CROUCH_MODE` cobre quem joga sentado. *Custo assumido:* inclinar-se move a câmera sem mover a caixa de colisão, então dá para "espiar através" da geometria — comportamento padrão em shooters VR.
-- [x] 🟢 **3.9** (Novo) **Vignette de conforto** (`VR_COMFORT_VIGNETTE`), desenhada na própria imagem do olho antes do `xrReleaseSwapchainImage`. **Padrão desligada** (0) — o plano previa intensidade leve por padrão, mas com snap turn (a opção mais confortável) ela é menos necessária e mexer na imagem do olho é exatamente onde já erramos duas vezes; fica a uma variável de distância depois da validação. Estado de GL salvo e restaurado, então o cache do ref_gl continua válido.
+- [x] 🟢 **3.1** OpenXR action set: thumbsticks, triggers, squeeze, A/B/X/Y, menu, haptic on `/user/hand/*`; `aim` poses per hand. Implemented in `mods/vr/mod_vr.cpp` (section "VR input"): action set `gameplay`, 14 actions, per-hand pose spaces and suggested bindings for `oculus/touch_controller`, `meta/touch_controller_plus` and the `khr/simple_controller` fallback (per-profile error is tolerated and logged). `xrAttachSessionActionSets` runs at the end of `xr_setup_session`, that is **before** `xrBeginSession`. *Done when:* the panel's `INPUT` block shows the per-hand interaction profile — it is what answers "did the controller match?" (if it comes up `(nenhum)` [none], no binding took).
+- [x] 🟡 **3.2** Locomotion: left stick → forward/side **relative to the head yaw**, with a radial deadzone (which is a *floor*, not a step: the rest of the range is rescaled) and `walk` while holding grip (`cl_movespeedkey`, the same factor as `+speed`). Head orientation costs no computation in the Mod: it injects the **HMD yaw** as `viewangles_abs` and sends the raw stick — `pm_shared` builds the `wishdir` with `AngleVectors(cmd.viewangles)` and ignores pitch on the ground. With the stick centered, the keyboard still works (see 3.7). *Done when:* walking/strafing in the game with the controller alone.
+- [x] 🟡 **3.3** Snap turn: right stick horizontal → step of `VR_TURN_SNAP_ANGLE` (default 30°), with a per-side **latch** (fires once and only re-arms when the stick returns to |x| < 0.3, otherwise it would spin in bursts with the stick held). **Deviation from the original plan:** it is not via reference space rotation — it is a **yaw offset** added to the HMD pose, applied **equally in the cmd and in the render** (`IN_ModAppendMove` and `VR_Camera`). Without that symmetry the body would shoot to one side and the camera would look to the other after the first step; and the offset is also what gives meaning to the roomscale offset (the world is the playspace rotated by the offset). The menu button **recenters** (zeroes the offset, recalibrates the height) and the runtime's `REFERENCE_SPACE_CHANGE_PENDING` event re-anchors on its own — without it a headset recenter would teleport the player. *Done when:* turning in steps without drift and without needing constant recentering.
+- [x] 🟡 **3.4** Buttons → game actions, injected through the engine's input route: right/left trigger = fire/secondary attack, A = jump, B = reload, X = use, Y = **scoreboard** (hold) and left stick click = crouch (in addition to the physical crouch). **Two deliberate deviations from the plan:** `Y = flashlight` became scoreboard and `menu = virtual ESC` became **recenter** — opening the game menu would be useless now, because **the 2D still comes out on the monitor, not the headset** (that is Phase 4); recentering, yes, is needed precisely because of snap turn. Mapping that back is one line when Phase 4 arrives. *Done when:* all actions execute in the match.
+- [x] 🟢 **3.5** Aim by the head: `viewangles_abs` = HMD pose, with pitch clamped at ±89 (the same clamp as the client's `CL_CreateMove` — the render can look further, what goes to the server cannot). The cmd's `roll` stays 0 on purpose: the game ignores roll and the render roll comes from `Mod_Camera`, which remains the only visual source. *Done when:* hitting fixed and moving targets consistently — **and the decisive test, which also proves the network route: shoot a wall and the hole appears where you are looking.**
+- [ ] 🟢 **3.6** (Optional, cuttable) Short haptic on firing. The vibration action **already exists and is bound** (`/user/hand/*/output/haptic`), but `xrApplyHapticFeedback` is not called yet — it just needs to be wired up.
+- [x] 🟢 **3.7** (New, came out of the design) **ABI v5 and application in the engine.** `MOD_CAP_INPUT` had existed since v1 but was inert (`Mods_Input` discarded the response). v5 added `move_up`/`viewangles_abs`/`has_viewangles_abs` and wired up the application: `IN_ModAppendMove` runs in `CL_CreateCmd` **after** the client DLL (that is why the Mod beats the mouse without disabling it, and the mouse keeps navigating menus) and **before** `CL_PredictMovement`. Details in `docs/MODS.md` §"Input". Flat regression guaranteed by construction: outside an active session the Mod returns the zeroed sample and the game stays identical to before.
+- [x] 🟢 **3.8** (New) **Roomscale and physical crouch.** The HMD position enters the camera as a **horizontal** offset (rotated by the snap offset, limited by `VR_ROOMSCALE_MAX`) — leaning works. The **vertical** axis does **not** enter the camera: the head dropping beyond `VR_CROUCH_DROP` (with hysteresis) becomes `MOD_BTN_CROUCH`, and it is the game's duck that lowers the view. It is on purpose — adding the two would lower the view twice. `VR_CROUCH_MODE` covers those who play seated. *Accepted cost:* leaning moves the camera without moving the collision box, so you can "peek through" geometry — standard behavior in VR shooters.
+- [x] 🟢 **3.9** (New) **Comfort vignette** (`VR_COMFORT_VIGNETTE`), drawn on the eye image itself before `xrReleaseSwapchainImage`. **Off by default** (0) — the plan called for a light intensity by default, but with snap turn (the most comfortable option) it is less necessary and touching the eye image is exactly where we already went wrong twice; it is one variable away after validation. GL state saved and restored, so the ref_gl cache stays valid.
 
-**Estado:** código completo, engine e mods compilados e instalados, **ABI v5 validada ponta a ponta sem headset** (`mods/null`: `loaded "null" (api 5)` com 237 frames e hooks pareados; `mods/vr`: `loaded "vr" (api 5, capabilities: display input hud)`). **Falta a validação com o headset**, que é a única que prova a locomoção: andar girando a cabeça, snap sem repetição, cada botão, agachar físico rebaixando uma vez só, o furo de bala onde se olha, e o menu do jogo (aberto pelo teclado) continuando a responder ao mouse com o VR sem mover o jogador.
+**Status:** code complete, engine and mods compiled and installed, **ABI v5 validated end to end without a headset** (`mods/null`: `loaded "null" (api 5)` with 237 frames and paired hooks; `mods/vr`: `loaded "vr" (api 5, capabilities: display input hud)`). **Still missing the headset validation**, which is the only one that proves locomotion: walking while turning the head, snap without repeats, every button, physical crouch lowering only once, the bullet hole where you look, and the game menu (opened by keyboard) continuing to respond to the mouse with VR without moving the player.
 
-**Marcador da fase:** partida jogável de ponta a ponta **sem teclado nem mouse** (spawn → andar → atirar → recarregar).
+**Phase milestone:** a match playable end to end **without keyboard or mouse** (spawn → walk → shoot → reload).
 
-### Fase 4 — HUD e menus em VR
+### Phase 4 — HUD and menus in VR
 
-- [x] 🔴 **4.1** Camada de captura 2D: hook pós-HUD redireciona todo desenho 2D (HUD do cs16-client, menus do menu_amd64, console, texto do engine) para um FBO offscreen (canvas virtual). *Pronto quando:* canvas contém HUD e menus renderizados (verificável via dump de textura). — implementado como **canvas do ref** sob demanda (`R_HudCanvasBegin/End/Info`, ABI **v8**): o `V_PostRender` desvia o 2D para um alvo RGBA8 do tamanho do espaço 2D e, no fim, devolve o resultado para a janela com blend (o monitor continua com HUD/menu). O Mod recebe o texnum em `Mod_Hud`. Canvas = tamanho da janela (o mesmo espaço em que o mouse do engine é medido). Validado em run flat: o menu aparece no dump vindo do canvas, e o canvas **só existe quando alguém pede** (nenhuma criação no jogo normal). **Recorte corrigido em 12/10 (defeito relatado pelo dono):** o canvas passou a capturar **só os menus** — HUD, console e overlays de debug desenham direto na janela — e o predicado virou `cls.key_dest == key_menu` (não `!= key_game`, que ligava o painel no console). Motivo: com o HUD dentro do canvas, o ícone verde de "zona de compra" (e, em partida, radar/mira/vida/munição) aparecia **por cima do menu de compra** no headset — "um elemento azul/ciano que não é a tela, mas por cima dela". Provado com `HUD_CANVAS_DUMP` (PAM RGBA do conteúdo do painel + histograma de alfa): antes o canvas tinha o ícone; depois, só o menu, com o menu idêntico.
-- [x] 🟡 **4.2** Painel virtual: canvas → textura de um quad no mundo; distância/escala calibráveis. *Pronto quando:* HUD e menus nítidos e legíveis dentro do óculos. — implementado com **âncora congelada no mundo** (na frente e na altura dos olhos **no instante em que o menu abre**, sem seguir a cabeça — decisão do dono em 12/10), quad **subdividido** (grade 6×6: a projeção de um retângulo é uma homografia e a grade mata o erro da interpolação afim), moldura escura, desenhado por olho em `Mod_AfterEyes` (antes do espelho, então o monitor também mostra o painel). Calibração ao vivo em `game/mods/vr_menu.cfg` (`dist_m`, `height_m`, `yaw_off_deg`, `y_off_m`, relido por mtime; salvar já aplica, mesmo com o menu aberto) + `VR_MENU_DIST`/`VR_MENU_HEIGHT`. A projeção do painel usa a **mesma fórmula do engine** (validado numericamente: 0,000000 px de diferença em 32 casos com o fov assimétrico real do Quest 3). **Bug do espelho (12/10, relatado pelo dono: "aparece espelhado horizontalmente"):** a "direita" do painel estava escrita como `(−sy, −cy, 0)` — só o X invertido — e a correta é `fwd × up = (sy, −cy, 0)`, a mesma do `AngleVectors` com pitch/roll zero. Com o sinal errado o retângulo deixava de ser perpendicular à frente: **espelhado** em todo yaw com seno não nulo e **cisalhado** nos demais (varredura de 72 yaws: 70 falhas com o vetor antigo — só 0° e 180° passavam — e zero com o corrigido). Verificado **sem headset** projetando o canvas real com a matemática do Mod (`/tmp/warp_panel.py`): o vetor antigo reproduz o menu espelhado, o novo sai correto, na mesma escala/posição. **Falta o olho do dono** para a legibilidade/posição.
-- [x] 🟡 **4.3** Ponteiro laser: raio da pose `aim` do controle intersecta o quad → mapeia para coordenadas 2D do canvas → injeta mousemove/click. *Pronto quando:* navegar menu principal, **buy menu** e console usando só o controle. — implementado: laser da **mão direita** (`xr_act_aim[1]`), interseção com o plano do painel → pixel do canvas; o engine ganhou o **cursor virtual** (`IN_GetCursorPos`) lido pelos **dois** consumidores de cursor (o `UI_MouseMove` do engine e o `GetMousePosition` que o client DLL usa nos menus dele — sem isso um puxaria o cursor de volta e o hover piscaria) e o clique é `IN_MouseEvent` → `Key_Event(K_MOUSE1)` → `UI_KeyEvent`. O gatilho direito vira clique (e não `ATTACK`) com menu aberto; o snap turn fica bloqueado (decisão do dono). Validado **sem headset** com o cvar de debug `hud_ptr_test` (dirige o cursor e o clique; `2` abre/fecha o menu sozinho): o clique injetado **ativou um item do menu** (abriu o Console: `key_dest: menu → console`), e a UI recebeu a posição injetada (1336 chamadas de `UI_MouseMove`). O teste numérico pegou um **sinal trocado** no `t` do raio antes de ir para o headset. **Falta o olho do dono** para o conforto de apontar.
-- [ ] 🟢 **4.4** Scoreboard e chat: confirmar que fluem pelo mesmo canvas (client HUD + texto do engine). *Pronto quando:* legíveis em partida. — *desenho do recorte de 12/10:* hoje o canvas **só liga com menu aberto**; ligá-lo sempre (HUD/placar no headset) é só trocar a política no Mod e testar o custo.
-- [ ] 🟢 **4.5** Overlay de debug do Mod (fps do HMD, poses, tempo de submit) atrás de `vr_debug 1`. *Pronto quando:* diagnóstico possível sem sair do óculos. — o painel de debug 2D (na janela) já cobre isso parcialmente e ganhou as duas linhas dos menus; no headset ainda não.
+- [x] 🔴 **4.1** 2D capture layer: post-HUD hook redirects all 2D drawing (cs16-client HUD, menu_amd64 menus, console, engine text) to an offscreen FBO (virtual canvas). *Done when:* canvas contains rendered HUD and menus (verifiable via texture dump). — implemented as an on-demand **ref canvas** (`R_HudCanvasBegin/End/Info`, ABI **v8**): `V_PostRender` diverts the 2D to an RGBA8 target the size of the 2D space and, at the end, returns the result to the window with blend (the monitor keeps HUD/menu). The Mod receives the texnum in `Mod_Hud`. Canvas = window size (the same space in which the engine's mouse is measured). Validated in a flat run: the menu appears in the dump coming from the canvas, and the canvas **only exists when someone asks for it** (no creation in the normal game). **Clipping fixed on 12/10 (defect reported by the owner):** the canvas started capturing **only the menus** — HUD, console and debug overlays draw straight to the window — and the predicate became `cls.key_dest == key_menu` (not `!= key_game`, which turned the panel on in the console). Reason: with the HUD inside the canvas, the green "buy zone" icon (and, in a match, radar/aim/health/ammo) appeared **over the buy menu** in the headset — "a blue/cyan element that is not the screen, but on top of it". Proven with `HUD_CANVAS_DUMP` (RGBA PAM of the panel content + alpha histogram): before, the canvas had the icon; after, only the menu, with the menu identical.
+- [x] 🟡 **4.2** Virtual panel: canvas → texture of a quad in the world; distance/scale calibratable. *Done when:* HUD and menus sharp and legible inside the headset. — implemented with a **world-frozen anchor** (in front and at eye height **at the instant the menu opens**, without following the head — owner's decision on 12/10), **subdivided** quad (6×6 grid: the projection of a rectangle is a homography and the grid kills the affine interpolation error), dark frame, drawn per eye in `Mod_AfterEyes` (before the mirror, so the monitor also shows the panel). Live calibration in `game/mods/vr_menu.cfg` (`dist_m`, `height_m`, `yaw_off_deg`, `y_off_m`, reread by mtime; saving already applies it, even with the menu open) + `VR_MENU_DIST`/`VR_MENU_HEIGHT`. The panel projection uses the **same formula as the engine** (validated numerically: 0.000000 px difference in 32 cases with the real asymmetric Quest 3 fov). **Mirror bug (12/10, reported by the owner: "it appears mirrored horizontally"):** the panel's "right" was written as `(−sy, −cy, 0)` — only X inverted — and the correct one is `fwd × up = (sy, −cy, 0)`, the same as `AngleVectors` with zero pitch/roll. With the wrong sign the rectangle stopped being perpendicular to the front: **mirrored** at every yaw with non-zero sine and **sheared** at the others (sweep of 72 yaws: 70 failures with the old vector — only 0° and 180° passed — and zero with the fixed one). Verified **without a headset** by projecting the real canvas with the Mod's math (`/tmp/warp_panel.py`): the old vector reproduces the mirrored menu, the new one comes out correct, at the same scale/position. **Waiting on the owner's eye** for legibility/position.
+- [x] 🟡 **4.3** Laser pointer: ray from the controller's `aim` pose intersects the quad → maps to 2D canvas coordinates → injects mousemove/click. *Done when:* navigate the main menu, **buy menu** and console using only the controller. — implemented: **right-hand** laser (`xr_act_aim[1]`), intersection with the panel plane → canvas pixel; the engine gained the **virtual cursor** (`IN_GetCursorPos`) read by **both** cursor consumers (the engine's `UI_MouseMove` and the `GetMousePosition` that the client DLL uses in its own menus — without it one would pull the cursor back and the hover would flicker) and the click is `IN_MouseEvent` → `Key_Event(K_MOUSE1)` → `UI_KeyEvent`. The right trigger becomes a click (and not `ATTACK`) with the menu open; snap turn is blocked (owner's decision). Validated **without a headset** with the debug cvar `hud_ptr_test` (drives the cursor and the click; `2` opens/closes the menu by itself): the injected click **activated a menu item** (opened the Console: `key_dest: menu → console`), and the UI received the injected position (1336 `UI_MouseMove` calls). The numeric test caught a **flipped sign** in the ray's `t` before going to the headset. **Waiting on the owner's eye** for the comfort of pointing.
+- [ ] 🟢 **4.4** Scoreboard and chat: confirm they flow through the same canvas (client HUD + engine text). *Done when:* legible in a match. — *design for the 12/10 clipping:* today the canvas **only turns on with the menu open**; turning it on always (HUD/scoreboard in the headset) is just changing the policy in the Mod and testing the cost.
+- [ ] 🟢 **4.5** Mod debug overlay (HMD fps, poses, submit time) behind `vr_debug 1`. *Done when:* diagnosis possible without leaving the headset. — the 2D debug panel (in the window) already covers that partially and gained the two menu lines; in the headset, not yet.
 
-**Marcador da fase:** fluxo completo no óculos — *menu → entrar na partida → comprar equipamento → jogar um round → scoreboard.*
+**Phase milestone:** full flow in the headset — *menu → join the match → buy equipment → play a round → scoreboard.*
 
-### Fase 5 — Integração, experiência e fechamento do MVP
+### Phase 5 — Integration, experience and MVP close-out
 
-- [ ] 🟢 **5.1** `scripts/run-cs-vr.sh`: configura `XR_RUNTIME_JSON` do WiVRn, lança o engine com `-mod vr`; sem headset detectado → fallback flat com aviso. *Pronto quando:* um comando sobe o jogo em VR.
-- [ ] 🟢 **5.2** Desktop entry "CS 1.6 VR" no GNOME (ícone dedicado, `StartupWMClass` próprio). *Pronto quando:* lançamento pelo menu do GNOME validado com `gtk-launch`.
-- [ ] 🟢 **5.3** Cvars de usuário finais (`vr_*`): snap turn, distância/escala do HUD, resolution scale, recenter (combo de botões), modo do painel — persistidos no config e documentados. *Pronto quando:* ajustáveis sem rebuild.
-- [ ] 🟡 **5.4** Teste end-to-end MP: cliente VR conecta no dedicado ReHLDS local e completa partida vs YAPB; logs do servidor comprovam cliente VR indistinguível de um cliente flat. *Pronto quando:* partida completa limpa, sem erros no log do servidor.
-- [ ] 🟢 **5.5** Checklist de conforto: sessão de 20+ min, recenter acessível, documentação de enjoo (snap turn default, walk com grip, pausas). *Pronto quando:* checklist documentado e cumprido pelos testadores.
-- [ ] 🟢 **5.6** README: seção VR (pré-requisitos, rede 5/6 GHz, solução de problemas) + `docs/MODS.md` finalizado. *Pronto quando:* pessoa nova instala e roda seguindo apenas a documentação.
-- [ ] 🟢 **5.7** Regressão final do modo flat contra o baseline da Fase 0.4. *Pronto quando:* checklist flat passa integralmente.
+- [ ] 🟢 **5.1** `scripts/run-cs-vr.sh`: sets the WiVRn `XR_RUNTIME_JSON`, launches the engine with `-mod vr`; no headset detected → flat fallback with a warning. *Done when:* one command brings the game up in VR.
+- [ ] 🟢 **5.2** Desktop entry "CS 1.6.1 VR" in GNOME (dedicated icon, its own `StartupWMClass`). *Done when:* launching from the GNOME menu validated with `gtk-launch`.
+- [ ] 🟢 **5.3** Final user cvars (`vr_*`): snap turn, HUD distance/scale, resolution scale, recenter (button combo), panel mode — persisted in the config and documented. *Done when:* adjustable without a rebuild.
+- [ ] 🟡 **5.4** End-to-end MP test: VR client connects to the local ReHLDS dedicated server and completes a match vs YAPB; server logs prove the VR client is indistinguishable from a flat client. *Done when:* complete clean match, no errors in the server log.
+- [ ] 🟢 **5.5** Comfort checklist: 20+ min session, reachable recenter, motion sickness documentation (snap turn default, walk with grip, breaks). *Done when:* checklist documented and followed by the testers.
+- [ ] 🟢 **5.6** README: VR section (prerequisites, 5/6 GHz network, troubleshooting) + `docs/MODS.md` finalized. *Done when:* a newcomer installs and runs following only the documentation.
+- [ ] 🟢 **5.7** Final flat mode regression against the Phase 0.4 baseline. *Done when:* flat checklist passes in full.
 
-**Marcador da fase:** critérios de aceite da seção 4 todos verdes.
+**Phase milestone:** acceptance criteria of section 4 all green.
 
-### Fase 6 — Jogabilidade de armas VR, etapa 1: arma na mão e mira pela mão
+### Phase 6 — VR weapon gameplay, stage 1: weapon in hand and aim by hand
 
-> **Nota de ordem:** esta fase foi implementada ANTES das Fases 4 e 5 (12/10) porque
-> não depende delas — é toda no cliente, sem servidor e sem HUD. A numeração dela fica
-> no fim só para não renumerar as fases existentes. O MVP da seção 4 é definido com
-> "mira pela cabeça", então armas VR são explicitamente **pós-MVP**.
+> **Ordering note:** this phase was implemented BEFORE Phases 4 and 5 (12/10) because
+> it does not depend on them — it is all on the client, without server and without HUD. Its
+> numbering stays at the end just to avoid renumbering the existing phases. The section 4 MVP is
+> defined with "aim by the head", so VR weapons are explicitly **post-MVP**.
 >
-> **O que a viabiliza (medido no código, não suposto):** o servidor calcula a direção do
-> tiro em `v_angle + punchangle` (`ReGameDLL_CS/…/weapons.cpp`) e o `v_angle` vem do
-> `usercmd` — o **mesmo** canal que o `pmove` usa para montar o `wishdir`
-> (`ReHLDS/…/sv_user.cpp`). Como o Mod já escreve esse canal desde a Fase 3, "atirar
-> para onde a mão aponta" é escolher o vetor certo; e a **orientação** do viewmodel
-> acompanha sozinha, porque o client DLL a deriva da view (`V_CalcGunAngle`). Só a
-> **origem** precisava de um hook novo.
+> **What makes it viable (measured in the code, not assumed):** the server computes the shot
+> direction from `v_angle + punchangle` (`ReGameDLL_CS/…/weapons.cpp`) and the `v_angle` comes
+> from the `usercmd` — the **same** channel the `pmove` uses to build the `wishdir`
+> (`ReHLDS/…/sv_user.cpp`). Since the Mod already writes that channel since Phase 3, "shoot
+> where the hand points" is choosing the right vector; and the viewmodel's **orientation**
+> follows on its own, because the client DLL derives it from the view (`V_CalcGunAngle`). Only the
+> **origin** needed a new hook.
 
-- [x] 🟡 **6.1** ABI v6: `mod_viewmodel_t` + `Mod_ViewModel` + as flags `RF_VIEWMODEL_WORLD`/`RF_NO_VIEWMODEL` (que desligam o hack `VIEWMODEL_DEPTH_RANGE` e permitem esconder o viewmodel). *Pronto quando:* o engine aplica origem/ângulos/flags do Mod no viewmodel. — feito; o hook é chamado **depois do `Mods_Camera`** (o `V_GetRefParams` zera as flags) e **por olho** (o `pfnCalcRefdef` reescreve o viewmodel a cada pass), então o Mod é idempotente por frame. `mod_null` e `mod_vr` recompilados; `Mods: loaded "null" (api 6)`.
-- [x] 🟡 **6.2** Mod: a arma vai para a mão — origem = olho central + o **mesmo** offset de roomscale da câmera + delta da mão (rodado pelo snap) + encaixe **no referencial da arma**. *Pronto quando:* a arma segue a mão 1:1 e é ocluída pelo mundo. — o encaixe sai de `game/mods/vr_weapon.cfg` (template versionado em `mods/vr/`), com **hot-reload de ~1 s** e tabela por classe; o painel ganhou a linha `arma` com a classe do modelo em uso.
-- [x] 🟢 **6.3** Mod: `VR_AIM_SOURCE=head|left|right` (padrão `right`) — a mira passa a ser o eixo da arma. *Pronto quando:* atirar numa parede e o furo aparecer onde a arma aponta. — implementado; falta o headset (6.6).
-- [x] 🟢 **6.4** Mod: a locomoção continua na cabeça mesmo com a mira na mão — o stick é pré-rotacionado por (mira − cabeça), que é a correção exata para o canal único de ângulos. Efeito colateral tratado: com o pitch do `usercmd` virando o da arma, o `pmove` escala o andar por `cos(pitch)`; `VR_MOVE_PITCH_COMP=1` compensa (padrão **desligado** = idêntico ao jogo). *Pronto quando:* andar com a cabeça virada segue a cabeça, não a arma.
-- [x] 🟢 **6.5** Validação sem headset: ABI v6 carrega os dois mods, o `vr_weapon.cfg` é lido e **relido ao vivo** (editado com o jogo rodando, o log mostrou `global 0 0 0` → `1 2 3`), e o modo flat não muda (com o VR inativo o Mod devolve a struct sem tocar em nada, então as flags ficam em 0 e o `R_DrawViewModel` executa o mesmo caminho de antes). *Pronto quando:* sem headset, nada quebra e o caminho novo é observável.
-- [ ] 🟡 **6.6** Validação com headset, em dois checkpoints de propósito: **(a)** `VR_AIM_SOURCE=head` — a arma na mão com a mira ainda pelo olhar, que é onde se calibra o encaixe sozinho; **(b)** `VR_AIM_SOURCE=right` — **atirar numa parede e o furo aparecer onde a arma aponta**. *Pronto quando:* o furo acompanha a arma, girar (snap + físico) não mexe na arma em relação à mão, andar segue a cabeça, encostar na parede esconde a arma, e `head` restaura o comportamento da Fase 3.
-- [x] 🟢 **6.7a Viewmodel próprio (classe pistol)** — o jogo para de desenhar o viewmodel
-  de 1999 e o mod desenha braços (WRAD ARMS, CC0) + pistola (Quaternius, CC0), com skin
-  na CPU e **IK de dois ossos** nos dois braços até os controles. Oclusão pelo mundo vem de
-  graça (o FBO do olho já tinha profundidade). Só a classe `pistol`; flat intocado. Doc:
-  `docs/HANDS.md`; assets e licenças: `CREDITS.md` + `mods/vr/assets/SOURCES.md`.
-- [x] 🟢 **6.7b Sistema de armas de VR (V2 do viewmodel próprio, 13/10)** — o que a 6.7a
-  deixou tosco (arma só na mão direita, de lado/para trás, 4,2× maior, sem dedos) virou um
-  sistema no padrão de jogo de VR moderno:
-  - **encaixe RESOLVIDO**: eixos por asset no cfg, referencial da MÃO derivado do rig,
-    empunhadura ancorada no centro da palma (medido) e escala pelo **comprimento real em cm**
-    — a pistola saiu de ~32 para **7,48 un = 19,0 cm**, com o cano a **0,0°** da frente da mão
-    e a empunhadura a **0,00 un** da palma;
-  - **dedos que fecham**: eixo de flexão derivado do repouso (`cross(Y, direção-da-palma)`),
-    30 ossos, pesos por dedo e punho fechado no cabo ao segurar;
-  - **coldre na barriga**, **saque por qualquer mão**, **largar no chão** (gravidade real, o
-    chão é o do próprio jogador), **pegar do chão** e **duas mãos** (o cano vai da mão de
-    apoio à de trás e o IK da mão de apoio mira a arma); soltar uma das mãos não derruba;
-  - **integração**: `MOD_BTN_ATTACK` gateado (`enforce_armed`), **mira pelo cano**
-    (`VR_AIM_FROM_WEAPON`, ligado), recuo visual no referencial da arma, yaw de tronco
-    amortecido opcional (`VR_BODY_YAW_LAG`) para o coldre não girar com a cabeça, e grip
-    **por mão** com `subactionPath` (duas ações XR, no lugar de uma misturada);
-  - **ferramenta de aceite**: folhas de contato (`VR_HANDS_SHEET=fit|weapon|curl|states|walk`)
-    desenhadas no MESMO caminho de produção, com vistas relativas ao corpo, conversor
-    `tools/ppm2png.py` e relatório numérico no log. As folhas (e o relatório) provaram o
-    encaixe e o roteiro `walk` provou **8/8** transições da máquina de estados sem headset.
-  - Doc: `docs/HANDS.md` (inclui as 9 notas de bug e o que falta no headset).
-  - *Falta o headset* (seu lado): as 7 verificações listadas em `docs/HANDS.md`.
-- [ ] 🟢 **6.7c Dívida registrada (fora desta etapa)**: **recarga/pino de granada por gesto**,
-  roll do pulso na arma (torção de antebraço), haptics, som, buy menu no VR, colisão da arma
-  largada e as **demais classes de arma** (rifle/SMG etc., que seguem no viewmodel do jogo).
-  O recuo (`punchangle`) continua desviando o tiro e **não** empurra a câmera — bom contra
-  enjoo, mas tira o retorno visual, que agora vem da arma.
-- [x] 🟡 **6.8** Ajuste fino do IPD pelo teclado (sintoma: "perto é difícil de fundir, longe parece certo" — clássico de separação entre as câmeras grande demais, porque a disparidade do que está longe é minúscula). ABI **v7**: `Mod_Key` + `MOD_CAP_KEYS` — o Mod vê a tecla **antes de todo handler do engine** e pode **consumi-la**, o que é o que permite uma UI de calibração sem a tecla vazar para o jogo. No `mod_vr`: F9/Home/End liga o modo; `-`/`=` = ±1,0 mm, `,`/`.` = ±0,1 mm, `0` zera; o ajuste é um **delta** sobre a base (runtime ou `VR_IPD`), aplicado **escalando** o vetor medido entre os olhos (preserva a direção, inclusive o cant); o número aparece **escrito nos dois olhos** (disparidade zero = lê-se dentro do headset), no painel 2D (`IPD 74.6 mm = base 68.3 (runtime) +6.3 | posicao +63`) e no log, e o delta persiste em `game/mods/vr_ipd.cfg`. *Pronto quando:* o ajuste muda a imagem de forma monotônica, o valor sobrevive ao restart e `0` volta à base. — implementado e validado sem headset (ABI v7 carrega; teclas injetadas na janela chegaram ao hook, o log registrou cada passo e o `.cfg` foi gravado).
-  - **Resultado do dono no headset (12/10):** o melhor ficou **no piso do ajuste** (o `-40,0 mm` de então → 27,3 mm), e ele quis descer mais. A trava era **minha** (`VR_IPD_DELTA_MAX_MM 40`), não física → o limite passou a ser o **IPD final** em **[0, 110] mm** (0 = as câmeras coincidem, imagem mono; abaixo de 0 os olhos trocam de lado e o cérebro não funde).
-  - **Calibração final do dono (12/10, com a faixa nova):** ele desceu de 1 em 1 mm até o **piso** — o `mods/vr_ipd.cfg` fechou em **`-67,2 mm` = IPD final 0,0 mm (mono)**, e é ali que o par funde melhor ("quanto menos, melhor" até o fim da faixa). O padrão compilado passou a ser esse (`VR_IPD_DELTA_DEFAULT_MM -67.2`, sobrescrito por `VR_IPD_ADJUST` e depois pelo `.cfg`). Como o gosto foi até o fim da faixa, o que sobra para investigar **não encolhe junto com o IPD**: desalinhamento vertical/rotacional do par (o cant do Quest 3) e o near plane fixo do engine (4 u ≈ 10 cm, que o roomscale deixa alcançar).
+- [x] 🟡 **6.1** ABI v6: `mod_viewmodel_t` + `Mod_ViewModel` + the flags `RF_VIEWMODEL_WORLD`/`RF_NO_VIEWMODEL` (which turn off the `VIEWMODEL_DEPTH_RANGE` hack and allow hiding the viewmodel). *Done when:* the engine applies the Mod's origin/angles/flags to the viewmodel. — done; the hook is called **after `Mods_Camera`** (`V_GetRefParams` zeroes the flags) and **per eye** (`pfnCalcRefdef` rewrites the viewmodel every pass), so the Mod is idempotent per frame. `mod_null` and `mod_vr` recompiled; `Mods: loaded "null" (api 6)`.
+- [x] 🟡 **6.2** Mod: the weapon goes to the hand — origin = center eye + the **same** roomscale offset as the camera + hand delta (rotated by the snap) + fit **in the weapon's reference frame**. *Done when:* the weapon follows the hand 1:1 and is occluded by the world. — the fit comes from `game/mods/vr_weapon.cfg` (template versioned in `mods/vr/`), with **~1 s hot-reload** and a table per class; the panel gained the `arma` (weapon) line with the class of the model in use.
+- [x] 🟢 **6.3** Mod: `VR_AIM_SOURCE=head|left|right` (default `right`) — the aim becomes the weapon's axis. *Done when:* shoot a wall and the hole appears where the weapon points. — implemented; still needs the headset (6.6).
+- [x] 🟢 **6.4** Mod: locomotion stays on the head even with the aim on the hand — the stick is pre-rotated by (aim − head), which is the exact correction for the single angles channel. Side effect handled: with the `usercmd` pitch becoming the weapon's, `pmove` scales walking by `cos(pitch)`; `VR_MOVE_PITCH_COMP=1` compensates (default **off** = identical to the game). *Done when:* walking with the head turned follows the head, not the weapon.
+- [x] 🟢 **6.5** Validation without a headset: ABI v6 loads both mods, `vr_weapon.cfg` is read and **reread live** (edited with the game running, the log showed `global 0 0 0` → `1 2 3`), and flat mode does not change (with VR inactive the Mod returns the struct without touching anything, so the flags stay at 0 and `R_DrawViewModel` runs the same path as before). *Done when:* without a headset, nothing breaks and the new path is observable.
+- [ ] 🟡 **6.6** Validation with a headset, at two checkpoints on purpose: **(a)** `VR_AIM_SOURCE=head` — the weapon in the hand with the aim still by the gaze, which is where you calibrate the fit yourself; **(b)** `VR_AIM_SOURCE=right` — **shoot a wall and the hole appears where the weapon points**. *Done when:* the hole follows the weapon, turning (snap + physical) does not move the weapon relative to the hand, walking follows the head, touching the wall hides the weapon, and `head` restores the Phase 3 behavior.
+- [x] 🟢 **6.7a Own viewmodel (pistol class)** — the game stops drawing the 1999
+  viewmodel and the mod draws arms (WRAD ARMS, CC0) + pistol (Quaternius, CC0), with CPU
+  skinning and **two-bone IK** on both arms up to the controllers. Occlusion by the world comes for
+  free (the eye FBO already had depth). Only the `pistol` class; flat untouched. Doc:
+  `docs/HANDS.md`; assets and licenses: `CREDITS.md` + `mods/vr/assets/SOURCES.md`.
+- [x] 🟢 **6.7b VR weapon system (V2 of the own viewmodel, 13/10)** — what 6.7a
+  left rough (weapon only in the right hand, sideways/backward, 4.2× bigger, no fingers) became a
+  system in the mold of a modern VR game:
+  - **fit RESOLVED**: per-asset axes in the cfg, HAND reference frame derived from the rig,
+    grip anchored at the palm center (measured) and scale by the **real length in cm**
+    — the pistol went from ~32 to **7.48 un = 19.0 cm**, with the barrel at **0.0°** from the hand's front
+    and the grip at **0.00 un** from the palm;
+  - **fingers that close**: flexion axis derived from rest (`cross(Y, palm-direction)`),
+    30 bones, per-finger weights and a fist closed on the grip when holding;
+  - **belly holster**, **draw with either hand**, **drop on the floor** (real gravity, the
+    floor is the player's own), **pick up from the floor** and **two-handed grip** (the barrel goes from the support hand
+    to the rear hand and the support hand's IK aims at the weapon); releasing one hand does not drop it;
+  - **integration**: gated `MOD_BTN_ATTACK` (`enforce_armed`), **barrel aim**
+    (`VR_AIM_FROM_WEAPON`, on), visual recoil in the weapon's reference frame, optional
+    damped torso yaw (`VR_BODY_YAW_LAG`) so the holster does not turn with the head, and grip
+    **per hand** with `subactionPath` (two XR actions, instead of one mixed);
+  - **acceptance tool**: contact sheets (`VR_HANDS_SHEET=fit|weapon|curl|states|walk`)
+    drawn on the SAME production path, with body-relative views, a `tools/ppm2png.py`
+    converter and a numeric report in the log. The sheets (and the report) proved the
+    fit and the `walk` script proved **8/8** state-machine transitions without a headset.
+  - Doc: `docs/HANDS.md` (includes the 9 bug notes and what is missing on the headset).
+  - *Still needs the headset* (your end): the 7 checks listed in `docs/HANDS.md`.
+- [ ] 🟢 **6.7c Registered debt (out of this stage)**: **gesture-based reload/grenade pin**,
+  wrist roll on the weapon (forearm twist), haptics, sound, buy menu in VR, dropped weapon
+  collision and the **remaining weapon classes** (rifle/SMG etc., which stay on the game viewmodel).
+  Recoil (`punchangle`) still deflects the shot and does **not** push the camera — good against
+  motion sickness, but it removes the visual feedback, which now comes from the weapon.
+- [x] 🟡 **6.8** Fine IPD adjustment via the keyboard (symptom: "near is hard to fuse, far looks right" — classic of camera separation being too large, because the disparity of what is far is tiny). ABI **v7**: `Mod_Key` + `MOD_CAP_KEYS` — the Mod sees the key **before every engine handler** and can **consume it**, which is what allows a calibration UI without the key leaking into the game. In `mod_vr`: F9/Home/End turns the mode on; `-`/`=` = ±1.0 mm, `,`/`.` = ±0.1 mm, `0` zeroes it; the adjustment is a **delta** over the base (runtime or `VR_IPD`), applied by **scaling** the measured vector between the eyes (preserves direction, including the cant); the number appears **written on both eyes** (zero disparity = read inside the headset), in the 2D panel (`IPD 74.6 mm = base 68.3 (runtime) +6.3 | posicao +63`) and in the log, and the delta persists in `game/mods/vr_ipd.cfg`. *Done when:* the adjustment changes the image monotonically, the value survives a restart and `0` returns to the base. — implemented and validated without a headset (ABI v7 loads; keys injected into the window reached the hook, the log recorded each step and the `.cfg` was written).
+  - **Owner's result on the headset (12/10):** the best landed **at the floor of the adjustment** (the then `-40.0 mm` → 27.3 mm), and he wanted to go lower. The clamp was **mine** (`VR_IPD_DELTA_MAX_MM 40`), not physical → the limit became the **final IPD** in **[0, 110] mm** (0 = the cameras coincide, mono image; below 0 the eyes swap sides and the brain does not fuse).
+  - **Owner's final calibration (12/10, with the new range):** he went down 1 mm at a time to the **floor** — `mods/vr_ipd.cfg` closed at **`-67.2 mm` = final IPD 0.0 mm (mono)**, and that is where the pair fuses best ("the less, the better" up to the end of the range). The compiled default became that one (`VR_IPD_DELTA_DEFAULT_MM -67.2`, overridden by `VR_IPD_ADJUST` and then by the `.cfg`). Since the taste went to the end of the range, what remains to investigate **does not shrink along with the IPD**: vertical/rotational misalignment of the pair (the Quest 3 cant) and the engine's fixed near plane (4 u ≈ 10 cm, which roomscale lets you reach).
 
-- [x] 🔴 **6.9** **Bug de culling na periferia** ("o mapa renderiza errado nas beiradas, sempre foi assim"): o engine escolhia o que submeter com uma frustum **simétrica** montada de `fov_x`/`fov_y` (`GL_FrustumInitProj`), e o mod publicava ali o **meio-ângulo** (54°/55°) enquanto os campos do engine são **abertura total** — a janela de culling saiu com **metade** da abertura da imagem. `R_CullSurface` só descarta superfície com a **caixa inteira** fora, então superfície grande que atravessa o centro continuava desenhada por inteiro e o defeito parecia "90% ok"; o que sumia era o que vive **só** na faixa externa (paredes distantes, o céu — cullado antes do teste de `SURF_DRAWSKY` (`gl_rsurf.c:3530`) —, água, partículas, feixes), deixando ver o que estava atrás. **Solução ideal:** `GL_FrustumInitProjAsym` (frustum pelos quatro ângulos de `fov_asym`, a MESMA região que o render) chamada em `R_SetupFrustum` quando `RF_FOV_ASYM`, e o mod passou a publicar `fov_x = right − left`, `fov_y = up − down` (unidade certa). *Pronto quando:* nenhuma direção visível é descartada e o flat não muda. — validado sem headset: a função nova coincide com a do engine em ângulos simétricos (0 divergências em 5 pares de FOV, incluindo 170×120) e, no olho esquerdo do Quest 3, a frustum antiga descartava **6.475 das 9.500 direções visíveis** contra **0** da nova; o flat renderiza igual (frame dump conferido). **Falta o olho do dono** para confirmar que a periferia ficou inteira.
+- [x] 🔴 **6.9** **Periphery culling bug** ("the map renders wrong at the edges, it has always been like that"): the engine chose what to submit with a **symmetric** frustum built from `fov_x`/`fov_y` (`GL_FrustumInitProj`), and the mod published there the **half-angle** (54°/55°) while the engine fields are **full aperture** — the culling window came out with **half** the image aperture. `R_CullSurface` only discards a surface when the **entire box** is outside, so a large surface crossing the center kept being drawn in full and the defect looked "90% ok"; what disappeared was what lives **only** in the outer band (distant walls, the sky — culled before the `SURF_DRAWSKY` test (`gl_rsurf.c:3530`) —, water, particles, beams), letting you see what was behind. **Ideal solution:** `GL_FrustumInitProjAsym` (frustum from the four `fov_asym` angles, the SAME region as the render) called in `R_SetupFrustum` when `RF_FOV_ASYM`, and the mod went back to publishing `fov_x = right − left`, `fov_y = up − down` (the right unit). *Done when:* no visible direction is discarded and flat does not change. — validated without a headset: the new function matches the engine's on symmetric angles (0 divergences in 5 FOV pairs, including 170×120) and, in the Quest 3's left eye, the old frustum discarded **6,475 of the 9,500 visible directions** against **0** for the new one; flat renders the same (frame dump checked). **Waiting on the owner's eye** to confirm the periphery came out whole.
 
-**Marcador da fase:** partida com a arma na mão — *mirar com a mão, acertar onde a arma aponta, andar pela cabeça.*
-
----
-
-## 4. Critérios de aceite do MVP (checklist de demo)
-
-- [ ] Do menu do GNOME → jogo estereoscópico no Quest 3 via WiVRn, com um comando.
-- [ ] Olhar 1:1 com a cabeça; andar, virar (snap), agachar e pular pelos controles.
-- [ ] Atirar e acertar com mira pela cabeça.
-- [ ] Comprar armas no buy menu com o ponteiro laser, dentro do óculos.
-- [ ] Partida vs YAPB completa no servidor dedicado local, sem alteração no servidor.
-- [ ] Modo flat intacto (baseline idêntico).
-- [ ] Um segundo Mod (template `null`) carrega pela mesma ABI, provando a arquitetura.
+**Phase milestone:** a match with the weapon in hand — *aim with the hand, hit where the weapon points, walk by the head.*
 
 ---
 
-## 5. Riscos e mitigações
+## 4. MVP acceptance criteria (demo checklist)
 
-| Risco | Impacto | Mitigação |
+- [ ] From the GNOME menu → stereoscopic game on the Quest 3 via WiVRn, with one command.
+- [ ] 1:1 head look; walk, turn (snap), crouch and jump through the controllers.
+- [ ] Shoot and hit with aim by the head.
+- [ ] Buy weapons in the buy menu with the laser pointer, inside the headset.
+- [ ] Full match vs YAPB on the local dedicated server, with no change on the server.
+- [ ] Flat mode intact (identical baseline).
+- [ ] A second Mod (`null` template) loads through the same ABI, proving the architecture.
+
+---
+
+## 5. Risks and mitigations
+
+| Risk | Impact | Mitigation |
 |---|---|---|
-| Projeção assimétrica do OpenXR vs frustum simétrico do pipeline GoldSrc | distorção/clip nas bordas | MVP aceita FOV simétrico com margem (T 2.5); projeção por olho como upgrade |
-| Performance: GL antigo a 90 Hz + encode WiVRn | jitter, reprojeto, enjoo | `vr_resolution_scale` (T 2.7), foveação condicional (T 2.8), pacing por `predictedDisplayTime` |
-| Latência/estabilidade do Wi-Fi | enjoo, desconexões | 5/6 GHz e AP próximo; risco queimado na Fase 0 com app de teste |
-| Suposições desktop no engine (mouse grab, janela única, vsync) | input quebrado em VR | Mod como "display owner" desliga paths desktop (T 2.4) |
-| `buildnum` do engine vs `MIN_XASH_VERSION 4190` do cs16-client | `Host_Error` no cliente VR | branch `vr-mod` mantém versionamento ≥ master (já causou crash antes) |
-| Combo WiVRn + GL + Fedora inesperado | bloqueio na Fase 2 | hello_xr isolado (T 0.2) valida antes de tocar no engine |
-| Enjoo em FPS rápido (movimento do CS) | usabilidade | snap turn default, walk com grip, documentação de conforto (T 5.5); vinheta fica pro pós-MVP |
-| GPL se distribuir binários | obrigação legal | xash3d-fwgs (GPL-3.0) + cs16-client (GPL-2.0): fonte do Mod aberto se distribuir; uso local sem obrigação |
+| OpenXR asymmetric projection vs symmetric frustum of the GoldSrc pipeline | distortion/clip at the edges | MVP accepts symmetric FOV with margin (T 2.5); per-eye projection as an upgrade |
+| Performance: old GL at 90 Hz + WiVRn encode | jitter, reprojection, motion sickness | `vr_resolution_scale` (T 2.7), conditional foveation (T 2.8), pacing by `predictedDisplayTime` |
+| Wi-Fi latency/stability | motion sickness, disconnects | 5/6 GHz and a nearby AP; risk burned in Phase 0 with a test app |
+| Desktop assumptions in the engine (mouse grab, single window, vsync) | broken input in VR | Mod as "display owner" turns off desktop paths (T 2.4) |
+| Engine `buildnum` vs cs16-client's `MIN_XASH_VERSION 4190` | `Host_Error` in the VR client | `vr-mod` branch keeps versioning ≥ master (already caused a crash before) |
+| Unexpected WiVRn + GL + Fedora combo | blocker in Phase 2 | isolated hello_xr (T 0.2) validates before touching the engine |
+| Motion sickness in a fast FPS (CS movement) | usability | snap turn default, walk with grip, comfort documentation (T 5.5); vignette is left for post-MVP |
+| GPL if distributing binaries | legal obligation | xash3d-fwgs (GPL-3.0) + cs16-client (GPL-2.0): Mod source open if distributing; local use with no obligation |
 
 ---
 
-## 6. Decisões abertas (resolver com protótipo na mão, não no papel)
+## 6. Open decisions (resolve with a prototype in hand, not on paper)
 
-1. Snap turn: rotação do reference space vs somar em viewangles — testar drift/recenter (T 3.3 decide).
-2. FOV simétrico com margem já basta para o MVP, ou a projeção assimétrica é obrigatória desde o início (T 2.5 decide).
-3. Painel do HUD: default "segue a cabeça" ou "fixo no mundo" — oferecer ambos, decidir default em teste (T 4.2).
-4. Binding final do grip: walk (locomoção) vs secondary fire (T 3.2 vs 3.4 — prototypes decidem).
-5. cs16-client precisará de branch própria? Hipótese: não — hooks no engine bastam para o MVP (reavaliar em T 4.1).
-
----
-
-## 7. Direção pós-MVP (contexto da arquitetura, não escopo atual)
-
-- **Mod v2 — arma 6DoF**: poses `aim` por controle → viewmodel e mira desacoplados do corpo (usa `Mod_Camera`/`Mod_Input` já existentes; primeiro ajuste real no cs16-client). **Etapa 1 feita na Fase 6** (arma na mão + mira pela mão, no cliente); o que resta aqui é o de 6.7: duas mãos, mãos visíveis e gestos.
-- **Mãos/corpo visíveis**, áudio espacial, passthrough, vinheta de conforto.
-- **Outros Mods na mesma ABI**: HD pack, gameplay overhaul, acessibilidade — fundação pronta na Fase 1, sem novo patch de engine.
+1. Snap turn: reference space rotation vs adding to viewangles — test drift/recenter (T 3.3 decides).
+2. Symmetric FOV with margin is already enough for the MVP, or is asymmetric projection mandatory from the start (T 2.5 decides).
+3. HUD panel: default "follows the head" or "fixed in the world" — offer both, decide the default in testing (T 4.2).
+4. Final grip binding: walk (locomotion) vs secondary fire (T 3.2 vs 3.4 — prototypes decide).
+5. Will cs16-client need its own branch? Hypothesis: no — hooks in the engine are enough for the MVP (reassess in T 4.1).
 
 ---
 
-## 8. Licenças
+## 7. Post-MVP direction (architecture context, not current scope)
 
-- `xash3d-fwgs`: GPL-3.0 · `cs16-client`: GPL-2.0 → o Mod VR, por carregar junto, herda as obrigações GPL **se distribuído em binário** (uso interno/local: nenhuma obrigação).
-- ReHLDS/ReGameDLL (MIT): o projeto VR não os toca; a **trilha de bots** (§9) acrescenta um módulo próprio (`cs_bot_advisor`) ao ReGameDLL, sob a mesma licença do upstream (MIT) — ver `docs/BOTBRAIN.md`.
-- Conteúdo Valve (`cstrike/`, `valve/`): permanece fora de qualquer redistribuição.
+- **Mod v2 — 6DoF weapon**: per-controller `aim` poses → viewmodel and aim decoupled from the body (uses the existing `Mod_Camera`/`Mod_Input`; first real adjustment in cs16-client). **Stage 1 done in Phase 6** (weapon in hand + aim by hand, on the client); what remains here is that of 6.7: two hands, visible hands and gestures.
+- **Visible hands/body**, spatial audio, passthrough, comfort vignette.
+- **Other Mods on the same ABI**: HD pack, gameplay overhaul, accessibility — foundation ready in Phase 1, with no new engine patch.
 
 ---
 
-## 9. Trilha paralela — bots com "cérebro lento" (Jev / TypeSafe)
+## 8. Licenses
 
-> **Status: V1 feita e verificada (2026-10-13), só de_dust2/defuse.** Não faz parte
-> do MVP de VR; usa a mesma infraestrutura de servidor e vale igual para VR e
-> flat, porque bots vivem no servidor. Documento completo: `docs/BOTBRAIN.md`.
+- `xash3d-fwgs`: GPL-3.0 · `cs16-client`: GPL-2.0 → the VR Mod, by being loaded alongside, inherits the GPL obligations **if distributed as a binary** (internal/local use: no obligation).
+- ReHLDS/ReGameDLL (MIT): the VR project does not touch them; the **bots track** (§9) adds its own module (`cs_bot_advisor`) to ReGameDLL, under the same upstream license (MIT) — see `docs/BOTBRAIN.md`.
+- Valve content (`cstrike/`, `valve/`): remains outside any redistribution.
 
-**Forma:** o CCSBot do ReGameDLL segue como músculo (nav, visão, mira, combate);
-um sidecar Python (`tools/botbrain/`) pergunta ao modelo **Jev** (TypeSafe) qual é
-o plano *do time* e devolve por arquivo; o módulo `cs_bot_advisor` (dentro do
-`cs.so`) aplica nos bots. O modelo nunca está no caminho crítico — o transporte é
-um mailbox em disco.
+---
 
-**Decisões de forma (por que não "LLM por tique"):** bots rodam a 10–30 Hz e o
-Jev faz 1 request por decisão em centenas de ms; então o Jev decide **onde/quando
-o time compromete** (no freeze e em eventos) e os algoritmos jogam. Uma decisão
-por time por momento, cache por assinatura grosseira (economia/placar/fase/clutch)
-e fallback total para o comportamento stock.
+## 9. Parallel track — bots with a "slow brain" (Jev / TypeSafe)
 
-**Intents (conjunto fechado):** T `RUSH_B|RUSH_A_LONG|RUSH_A_SHORT|SPLIT_A|`
+> **Status: V1 done and verified (2026-10-13), de_dust2/defuse only.** It is not part
+> of the VR MVP; it uses the same server infrastructure and applies equally to VR and
+> flat, because bots live on the server. Full document: `docs/BOTBRAIN.md`.
+
+**Shape:** ReGameDLL's CCSBot stays as the muscle (nav, vision, aim, combat);
+a Python sidecar (`tools/botbrain/`) asks the **Jev** model (TypeSafe) what the
+*team* plan is and returns it by file; the `cs_bot_advisor` module (inside
+`cs.so`) applies it to the bots. The model is never on the critical path — the transport is
+a mailbox on disk.
+
+**Shape decisions (why not "LLM per tick"):** bots run at 10–30 Hz and
+Jev makes 1 request per decision in hundreds of ms; so Jev decides **where/when
+the team commits** (at freeze and on events) and the algorithms play. One decision
+per team per moment, cache by coarse signature (economy/scoreboard/phase/clutch)
+and total fallback to stock behavior.
+
+**Intents (closed set):** T `RUSH_B|RUSH_A_LONG|RUSH_A_SHORT|SPLIT_A|`
 `HOLD_AFTER_PLANT|ECO_SAVE|DEFAULT`; CT `STACK_A|STACK_B|RETAKE_A|RETAKE_B|`
-`ECO_SAVE|DEFAULT`. O mapa intent→comportamento usa só os centros de zona do
-próprio mapa (nenhuma coordenada de dust2 no código).
+`ECO_SAVE|DEFAULT`. The intent→behavior map uses only the map's own zone centers
+(no dust2 coordinates in the code).
 
-**Verificado:** bots jogam dust2 (nav gerado, 4v4, plantam/defusam); `RUSH_B`
-planta em B e `RUSH_A_LONG` em A; o laço observe→Jev→plano→aplicado aparece no
-log do servidor; e as decisões variam com o estado (postplant→`RETAKE_*`/
-`HOLD_AFTER_PLANT`; inimigo repetindo B→`STACK_A`).
+**Verified:** bots play dust2 (generated nav, 4v4, they plant/defuse); `RUSH_B`
+plants at B and `RUSH_A_LONG` at A; the observe→Jev→plan→applied loop shows up in
+the server log; and the decisions vary with the state (postplant→`RETAKE_*`/
+`HOLD_AFTER_PLANT`; enemy repeating B→`STACK_A`).
 
-**Fora da V1:** outros mapas, Jev por bot, política aprendida/destilação, chatter
-gerado, micro-gestão de compra, transporte por socket, UI.
+**Out of V1:** other maps, Jev per bot, learned policy/distillation, generated
+chatter, buy micro-management, socket transport, UI.
 
