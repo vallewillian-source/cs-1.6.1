@@ -595,7 +595,8 @@ static void cfg_defaults( void )
 	cfg.recoil_deg = 7.0f; cfg.recoil_kick = 0.9f; cfg.recoil_interval = 0.09f;
 	cfg.enforce_armed = true;   // com a arma no coldre/chao, o gatilho nao atira
 	cfg.synth_grip = 1.0f;
-	cfg.synth_dist = 24.0f; cfg.synth_side = 5.5f; cfg.synth_down = 9.0f;
+	cfg.synth_dist = 16.0f;      // dentro do alcance (~22 un): alvo fora do alcance deixa o braco reto
+	cfg.synth_side = 5.5f; cfg.synth_down = 9.0f;
 	cfg.near_clip = 4.0f;        // igual ao ref (gl_rmain.c: zNear = 4.0f)
 	cfg.far_clip = 7086.0f;      // ~ movevars.zmax * 1.73 (idem)
 	cfg.color_gamma = 2.2f;
@@ -817,7 +818,12 @@ static void palm_from_rest( hmesh_t *m )
 		{
 			m->palm_fwd[h][c] = fwd[c];
 			m->palm_up[h][c]  = -nrm[c];                     // costas da mao
-			m->palm_ctr[h][c] = wrist[c] + fwd[c] * ( 0.55f * d );
+			// CENTRO DA PALMA **relativo ao punho**. Guardar a posicao ABSOLUTA do rig
+			// (`wrist + fwd*0.55d`, ~6 un. do centro do corpo) parecia inofensivo, mas o
+			// referencial da mao tem ORIGEM no punho: com um ponto absoluto ali, a arma
+			// ganhava ~27 un. de deslocamento e saia da mao. Mesma familia do bug do
+			// rest_world na munheca — coordenada absoluta onde se esperava deslocamento.
+			m->palm_ctr[h][c] = fwd[c] * ( 0.55f * d );
 		}
 		v3_cross( m->palm_left[h], m->palm_up[h], m->palm_fwd[h] );
 		m->palm_off[h] = 0.55f * d;
@@ -1273,6 +1279,12 @@ typedef struct
 	float grip_world[3];       // ponto de empunhadura no mundo (diagnostico)
 	float aim[3];
 	float fit_dist;
+	float wrist_ik[2][3];      // onde o IK pos o punho (unidades GoldSrc, mundo)
+	float wrist_slip[2];       // distancia da malha do punho ate o alvo do IK (0 = certo)
+	float palm_slip[2];        // distancia do centro da palma da MALHA ate o referencial (0 = arma na mao)
+	float arm_target[2];       // distancia ombro->alvo, CRUA (antes do clamp)
+	float arm_reach[2];        // alcance da cadeia (biceps+antebraco) no repouso
+	float elbow_deg[2];        // quanto o cotovelo dobra: 0 = esticado, 90+ = dobrado
 	float focus[3];            // onde a folha de contato deve enquadrar
 } hscene_t;
 
@@ -1434,6 +1446,27 @@ static void weapon_step( const vr_hands_body_t *body, const vr_hands_in_t *in,
 }
 
 // ------------------------------------------------------------ frames -------
+// Pose da mao SINTETICA (diagnostico sem headset). Existe uma SO copia de proposito:
+// o `frame_build` (desenho) e o `vr_hands_update` (estado/mira) precisam da MESMA pose,
+// senao a folha de contato passa a mostrar uma coisa e a mira a apontar para outra.
+//
+// As duas maos ficam DENTRO do alcance do braco (~22 un). Alvo fora do alcance obriga a
+// cadeia a ficar reta, e braco reto visto de perto parece "esticado" na folha: o defeito
+// seria do alvo, nao da IK (o relato `braco:` imprime alvo/alcance/cotovelo para separar
+// os dois casos). A mao esquerda sai menos para o lado porque o ombro esquerdo ja esta a
+// ~8 un dali — com o mesmo deslocamento da direita ela cairia fora do alcance.
+static void synth_hand_fill( const vr_hands_body_t *body, vr_hands_hand_t *H, int h )
+{
+	const float fw = cfg.synth_dist, sd = ( h == 1 ? cfg.synth_side : cfg.synth_side * 0.40f );
+	const float dn = cfg.synth_down;
+	for( int c = 0; c < 3; c++ )
+		H->pos[c] = body->pos[c] + body->fwd[c]*fw + body->rgt[c]*sd - body->up[c]*dn;
+	memcpy( H->fwd, body->fwd, sizeof( H->fwd ));
+	memcpy( H->rgt, body->rgt, sizeof( H->rgt ));
+	memcpy( H->up,  body->up,  sizeof( H->up  ));
+	H->ok = true;
+}
+
 // Constroi a cena: rig ancorado no corpo, IK dos dois bracos, referencia da mao,
 // arma (na mao/coldre/chao), dedos e skin. `force_state` < 0 = usa o estado real
 // (a folha de contato passa valores fixos); `force_grip` < 0 = usa o grip de entrada.
@@ -1448,17 +1481,7 @@ static void frame_build( hscene_t *s, const vr_hands_body_t *body, const vr_hand
 	{
 		bool real = hands && hands[h].ok && !cfg.synth_hands;
 		if( real ) H[h] = hands[h];
-		else
-		{
-			// duas maos a frente do corpo: prova a IK e o encaixe SEM headset
-			const float fw = cfg.synth_dist, sd = ( h == 1 ? cfg.synth_side : cfg.synth_side * 0.27f ), dn = cfg.synth_down;
-			for( int c = 0; c < 3; c++ )
-				H[h].pos[c] = body->pos[c] + body->fwd[c]*fw + body->rgt[c]*sd - body->up[c]*dn;
-			memcpy( H[h].fwd, body->fwd, sizeof( H[h].fwd ));
-			memcpy( H[h].rgt, body->rgt, sizeof( H[h].rgt ));
-			memcpy( H[h].up,  body->up,  sizeof( H[h].up  ));
-			H[h].ok = true;
-		}
+		else synth_hand_fill( body, &H[h], h );
 		s->hands_ok[h] = H[h].ok;
 	}
 
@@ -1549,6 +1572,8 @@ static void frame_build( hscene_t *s, const vr_hands_body_t *body, const vr_hand
 
 	// ---- 5) IK: a mao de tras primeiro — a de apoio pode mirar a ARMA ----
 	float support_target[3] = { 0.0f, 0.0f, 0.0f };
+	bool ik_ok[2] = { false, false };
+	s->wrist_slip[0] = s->wrist_slip[1] = -1.0f;   // -1 = a IK nao resolveu esta mao
 	for( int pass = 0; pass < 2; pass++ )
 	{
 		int h = pass ? 1 - rear : rear;
@@ -1571,6 +1596,10 @@ static void frame_build( hscene_t *s, const vr_hands_body_t *body, const vr_hand
 		float dist = sqrtf( v3_dot( d, d ));
 		if( dist < 1e-4f ) continue;
 		float n[3] = { d[0]/dist, d[1]/dist, d[2]/dist };
+		// diagnostico: o alvo esta ao alcance? (dist > reach = braco necessariamente
+		// esticado, e ai a culpa e do alvo, nao da cadeia)
+		s->arm_target[h] = dist;
+		s->arm_reach[h] = L1 + L2;
 		float dmax = ( L1 + L2 )*0.999f, dmin = fabsf( L1 - L2 )*1.05f + 1e-3f;
 		if( dist > dmax ) dist = dmax;
 		if( dist < dmin ) dist = dmin;
@@ -1613,6 +1642,13 @@ static void frame_build( hscene_t *s, const vr_hands_body_t *body, const vr_hand
 		float rf[3] = { Ww2[12]-e2[0], Ww2[13]-e2[1], Ww2[14]-e2[2] };
 		float nf[3] = { target[0]-e2[0], target[1]-e2[1], target[2]-e2[2] };
 		v3_norm( rf ); v3_norm( nf );
+		{
+			// angulo do cotovelo: entre o braco (nu) e o antebraco (nf). 0 = esticado
+			float dot2 = v3_dot( nu, nf );
+			if( dot2 > 1.0f ) dot2 = 1.0f;
+			if( dot2 < -1.0f ) dot2 = -1.0f;
+			s->elbow_deg[h] = acosf( dot2 ) * 180.0f / ( float )M_PI;
+		}
 		m4 R2, Wf3;
 		rot_between( R2, rf, nf );
 		translate_matrix( Tp, e2 );
@@ -1632,11 +1668,27 @@ static void frame_build( hscene_t *s, const vr_hands_body_t *body, const vr_hand
 		cur_world( &g_arms, cur, jw, Wwk );
 		float wr[3] = { Wwk[12], Wwk[13], Wwk[14] };
 
-		m4 Ph, ip;
+		// A mao e o UNICO osso cujo mundo e escrito por fora da cadeia (o IK posiciona
+		// o antebraco; o controle decide a rotacao da mao). O mundo que se quer e
+		//   P_mao . R(repouso do punho)  -- a rotacao do repouso SEM a translacao
+		// e nao `P_mao . rest_world[jw]`. A translacao do repouso e a POSICAO do punho
+		// dentro do espaco do rig (~6 unidades, o rig e um corpo inteiro), e como o skin
+		// e `cur_world . ibm` ela NAO cancela: entrava como `wr + s.Rw.p_repouso`, jogando
+		// a malha da mao ~26 u (66 cm) para longe do punho. O skin esticava entre o
+		// antebraco (correto) e a mao (deslocada): "antebraco gigante, mao la longe".
+		// Sem ela, o skin do punho fica exatamente T(wr).S(s).Rw.T(-p_repouso) — roda a
+		// mao em torno do proprio punho e poe o punho onde o IK o pos.
+		m4 Ph, Rho, ip;
 		m4_place( Ph, Rw[h], wr, cfg.scale_arms );
+		memcpy( Rho, g_arms.rest_world[jw], sizeof( m4 ));
+		Rho[12] = Rho[13] = Rho[14] = 0.0f;
 		m4_inv( ip, Wf3 );
 		m4_mul( t1, ip, Ph );
-		m4_mul( cur[jw], t1, g_arms.rest_world[jw] );
+		m4_mul( cur[jw], t1, Rho );
+
+		// onde o IK pos o punho: e contra isto que a malha e conferida no passo 9
+		memcpy( s->wrist_ik[h], wr, sizeof( wr ));
+		ik_ok[h] = true;
 
 		// referencia da mao (para a arma e para a folha): centro da palma
 		float ctr[3];
@@ -1745,6 +1797,32 @@ static void frame_build( hscene_t *s, const vr_hands_body_t *body, const vr_hand
 		m4 w;
 		cur_world( &g_arms, cur, i, w );
 		m4_mul( skin[i], w, g_arms.joint[i].ibm );
+	}
+
+	// METRICA DE ACEITE da cadeia da mao: pega o ponto de REPOUSO do punho, passa pelo
+	// skin e confere se ele caiu onde a IK pos o punho. O skin do punho e
+	// T(punho).S(s).Rw.T(-repouso), entao o ponto de repouso tem de voltar exatamente
+	// em `wrist_ik` — o numero TEM de ser 0.00. Nao e decoracao: foi assim que o bug da
+	// translacao do repouso (malha da mao 26 u longe, antebraco esticado) apareceu.
+	for( int h = 0; h < 2; h++ )
+	{
+		const int jw = g_arms.j_wrist[h];
+		s->palm_slip[h] = -1.0f;
+		if( !ik_ok[h] || jw < 0 ) continue;
+		float p[3] = { g_arms.rest_world[jw][12], g_arms.rest_world[jw][13],
+			g_arms.rest_world[jw][14] }, q[3];
+		m4_xform_point( skin[jw], p, q );
+		float d[3] = { q[0]-s->wrist_ik[h][0], q[1]-s->wrist_ik[h][1], q[2]-s->wrist_ik[h][2] };
+		s->wrist_slip[h] = sqrtf( v3_dot( d, d ));
+
+		// e o CENTRO DA PALMA da malha tem de cair onde esta o referencial da mao (que e
+		// onde a arma ancora a empunhadura). O ponto absoluto do centro da palma no rig e
+		// `palm_ctr` (relativo ao punho) + a posicao de repouso do punho.
+		float pa[3] = { g_arms.palm_ctr[h][0] + p[0], g_arms.palm_ctr[h][1] + p[1],
+			g_arms.palm_ctr[h][2] + p[2] };
+		m4_xform_point( skin[jw], pa, q );
+		float e[3] = { q[0]-s->palm_pos[h][0], q[1]-s->palm_pos[h][1], q[2]-s->palm_pos[h][2] };
+		s->palm_slip[h] = sqrtf( v3_dot( e, e ));
 	}
 
 	free( s->cur ); free( s->skin );
@@ -1892,16 +1970,7 @@ void vr_hands_update( const vr_hands_body_t *body, const vr_hands_in_t *in,
 			H[h] = hands[h];
 			if( cfg.synth_hands ) H[h].ok = false;
 		}
-		else
-		{
-			const float fw = cfg.synth_dist, sd = ( h == 1 ? cfg.synth_side : cfg.synth_side * 0.27f ), dn = cfg.synth_down;
-			for( int c = 0; c < 3; c++ )
-				H[h].pos[c] = body->pos[c] + body->fwd[c]*fw + body->rgt[c]*sd - body->up[c]*dn;
-			memcpy( H[h].fwd, body->fwd, sizeof( H[h].fwd ));
-			memcpy( H[h].rgt, body->rgt, sizeof( H[h].rgt ));
-			memcpy( H[h].up,  body->up,  sizeof( H[h].up  ));
-			H[h].ok = true;
-		}
+		else synth_hand_fill( body, &H[h], h );
 	}
 
 	// estado da arma (na mao / coldre / chao) e so DEPOIS a pose: a maquina usa as
@@ -2304,6 +2373,15 @@ void vr_hands_sheet( const vr_hands_cam_t *cam )
 				( double )( acosf( dot ) * 180.0f / ( float )M_PI ),
 				( double )one.fit_dist, ( double )( g_weapon.len[0] * g_weapon_scale ),
 				( double )( g_weapon.len[0] * g_weapon_scale * 2.54f ));
+			// aceite da cadeia da mao: a malha tem de cair ONDE a matematica a pos
+			vlog( "maos: mao: punho desliza %.2f/%.2f un | centro da palma %.2f/%.2f un (esq/dir) — 0.00 = malha e referenciais concordam\n",
+				( double )one.wrist_slip[0], ( double )one.wrist_slip[1],
+				( double )one.palm_slip[0], ( double )one.palm_slip[1] );
+			// o alvo esta ao alcance? (cotovelo 0 = esticado; culpa do alvo, nao da cadeia)
+			vlog( "maos: braco: alvo a %.1f/%.1f un do ombro | alcance %.1f/%.1f un | cotovelo dobrado %.0f/%.0f graus (0 = esticado)\n",
+				( double )one.arm_target[0], ( double )one.arm_target[1],
+				( double )one.arm_reach[0], ( double )one.arm_reach[1],
+				( double )one.elbow_deg[0], ( double )one.elbow_deg[1] );
 			scene_free( &one );
 		}
 

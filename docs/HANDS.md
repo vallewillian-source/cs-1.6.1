@@ -180,7 +180,7 @@ you can adjust fit, scale, axes and the contact sheet without restarting the gam
 | `recoil_deg` / `recoil_kick` / `recoil_interval` | 7 / 0.9 / 0.09 | visual recoil |
 | `enforce_armed` | 1 | outside the hand, the trigger does not fire |
 | `sheet` | 0 | contact sheet (see below) |
-| `synth_hands` / `synth_grip` / `synth_dist` / `synth_side` / `synth_down` | 0 / 1 / 24 / 5.5 / 9 | diagnostic synthetic hands |
+| `synth_hands` / `synth_grip` / `synth_dist` / `synth_side` / `synth_down` | 0 / 1 / 16 / 5.5 / 9 | diagnostic synthetic hands (16 u keeps the target inside the ~22 u reach) |
 | `near` / `far` / `color_gamma` | 4 / 7086 / 2.2 | match the ref; the MTL's `Kd` is linear |
 
 ## Diagnosis without a headset: the contact sheets
@@ -218,20 +218,28 @@ document.</em></p>
 (bottom). The closing direction is derived, not authored — it comes out correct for both hands and for
 the thumb because the axis is computed from the rig's own rest pose.</em></p>
 
-**Honest caveat about the sheets that show the arms.** In test mode there are no controllers: the
-hands sit at the synthetic positions from the cfg (`synth_dist/side/down`), so the **arms are
-stretched and look wrong** in the `fit`, `states` and `walk` sheets. That is an artifact of the
-fixture, not of the arms — with controllers in hand the IK targets are where your hands actually
-are. Use those sheets for the weapon's fit, size and position; do not judge the arms by them.
+**About the arms in the sheets.** In test mode there are no controllers: the hands sit at the
+synthetic positions from the cfg (`synth_dist/side/down`). Two consequences worth knowing before
+you judge an image:
+
+- the **support (left) hand** is placed across the body, the way a real two-handed grip is, so its
+  arm is close to full extension — and a nearly straight arm, seen from a camera sitting on the
+  hand, reads as a wide foreshortened shape. The `braco:` line reports the numbers (`alvo` vs
+  `alcance`, and the elbow bend), so you can tell "the arm is at full stretch because the target is
+  far" from "the chain is wrong";
+- the fixture values are deliberately chosen **inside** the arm's reach (~22 u). An out-of-reach
+  target forces the arm straight and makes the sheets useless for judging the pose.
+
+They are the right tool for the weapon's fit, size and position — that is what they exist for.
 
 <p align="center">
-  <img src="img/contact-sheet-fit.png" alt="Raw fit sheet: twelve views of the right hand holding the pistol, with the arm geometry stretched toward the synthetic hand position" width="80%">
+  <img src="img/contact-sheet-fit.png" alt="Raw fit sheet: twelve views of the right hand holding the pistol, the support arm extended and foreshortened" width="80%">
 </p>
 
 <p align="center"><em>The raw <code>fit</code> sheet, unedited, so the caveat above is not a claim you
-have to take on faith: the weapon is correctly sized and seated in the hand in all twelve views, while
-the arm geometry running off to the lower left is the synthetic target stretching the IK. This is what
-a regenerated sheet will look like without a headset attached.</em></p>
+have to take on faith. This is exactly what a regenerated sheet looks like with no headset attached:
+the firing hand grips the pistol in all twelve views, and the support arm crosses the frame at full
+extension, as it does in a real two-handed grip.</em></p>
 
 The same drawing prints a **numeric report** in the log — it is what allows deciding without
 looking at the image:
@@ -279,7 +287,16 @@ without an equipped weapon), `VR_AIM_FROM_WEAPON=0`, `VR_BODY_YAW_LAG=0.25`,
 | Fingers | `curl` sheet | close toward the palm, at all 4 levels, **in both hands** |
 | Holster | report + `states` sheet | barrel at **−0.94** from the body vertical (muzzle down) |
 | States | `walk` sheet + log | **8/8** steps: grab (left), 2 hands, release the rear one, store, draw (right) |
+| Mesh follows the pose | report: `mao:` line | wrist mesh vs IK target **0.00/0.00 u**; mesh palm centre vs hand frame **0.00/0.00 u** (see note 11) |
+| Arm is not over-extended | report: `braco:` line | target 23.4/16.9 u against a reach of 21.9 u → support arm extended, firing arm bent 79° |
 | Flat did not regress | game without `VR_HANDS_TEST` | no line from the subsystem in the log; mod loads normally |
+
+The last two rows exist because of a bug that images alone did not pin down: the **wrist bone's
+world matrix** was being built with the *rest position* of the wrist baked into it, which threw the
+hand mesh ~26 u (66 cm) away from where the IK had put the wrist. The bones kept their lengths, so
+no bone-length check would have caught it — only comparing **where the skinned mesh lands** against
+**where the math says it should** does. Those two numbers are now printed on every report and must
+read `0.00`; they are the regression test for the whole class.
 
 ### Still to validate with the headset (your side)
 
@@ -337,3 +354,25 @@ without an equipped weapon), `VR_AIM_FROM_WEAPON=0`, `VR_BODY_YAW_LAG=0.25`,
    replaced by an explicit sheet mode).
 10. **In test mode the `update` did not run**: it was only inside the `VR_FramePre` session
     block, which does not exist without a headset. The contact sheet stayed blank.
+11. **The hand bone's world matrix carried the wrist's REST POSITION.** The wrist is the only
+    bone whose world is written from outside the chain (the IK places the forearm; the
+    controller decides the hand's rotation), and it was computed as
+    `inv(forearm) . P_hand . rest_world[wrist]` — with the *whole* rest matrix, translation
+    included. The rig's rest positions are absolute body coordinates (the wrist sits ~6 units
+    from the rig origin), and the skin is `cur_world . ibm`, so that translation does **not**
+    cancel: it landed the hand mesh at `wrist + 4.2 . Rw . p_rest`, roughly **26 u (66 cm) past
+    the wrist**. The bones still had their correct lengths, so the skeleton looked fine while
+    the skin stretched from the (correct) forearm to the (displaced) hand — reported from the
+    headset as *"the shoulder and upper arm are great, the forearm is stretched and gigantic,
+    and the hand is way out there"*. The fix is to use only the **rotation** of the rest matrix
+    (`rest_world[wrist]` with its translation zeroed), which makes the skin exactly
+    `T(wrist) . S(s) . Rw . T(-p_rest)`: rotate the hand about its own wrist and put the wrist
+    where the IK put it. Two numbers now guard it — see the `mao:` report line.
+12. **The palm centre was stored as an ABSOLUTE rig coordinate.** Same family as 11, one level
+    up: `palm_ctr` was `wrist + fwd * 0.55 d` in rig space, and the hand frame it feeds
+    (`P_hand`, whose origin is the *wrist*) then added those ~6 units again — this time to the
+    **weapon**, which is mounted on that frame. The pistol left the hand and floated ~27 u
+    away, while the hand (fixed by 11) sat correctly on the wrist. It is now stored **relative
+    to the wrist**, which is what the hand frame expects. Both errors were the same mistake:
+    an absolute coordinate where a displacement was expected, in a frame whose origin is not
+    the rig origin.

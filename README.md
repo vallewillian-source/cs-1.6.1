@@ -29,9 +29,9 @@ your controllers, with the whole interaction model modern VR games use.
 </p>
 
 <p align="center"><em>Left: the weapon fit, from the Mod's own diagnostic mode — the red/green/blue
-cross is the grip anchor, the white line runs grip&rarr;muzzle. Right: the hand closing, open to
-fist, on the weapon and empty. Both images were rendered by the game through its normal drawing
-path, with no headset attached.</em></p>
+cross is the grip anchor, the white line runs grip&rarr;muzzle. Right: the same hand at four grip
+levels — 0, &#8531;, &#8532;, 1 — closing toward the palm; the two rows are the two hands. Both images
+were rendered by the game through its normal drawing path, with no headset attached.</em></p>
 
 - **Your hands are the game's hands.** Two-bone IK per arm to your controllers, and the 30
   finger bones are driven by a flexion axis *derived from the rig's own rest pose* — so the

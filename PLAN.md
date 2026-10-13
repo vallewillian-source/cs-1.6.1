@@ -296,6 +296,37 @@ Conventions:
     fit and the `walk` script proved **8/8** state-machine transitions without a headset.
   - Doc: `docs/HANDS.md` (includes the 9 bug notes and what is missing on the headset).
   - *Still needs the headset* (your end): the 7 checks listed in `docs/HANDS.md`.
+- [x] 🔴 **6.7b-fix The arm was posed right and the MESH was not (13/10, from the owner's headset
+  report)** — *"the shoulder and the start of the arm are great, but at the forearm it got
+  stretched and gigantic, so the hand ended up way out there."* The forearm mesh was stretched ~26
+  un past the wrist, and **no bone had the wrong length**: the skeleton was correct, the numbers
+  for the fit were correct, and the contact sheets still "looked like an arm" if you did not know
+  what to look for. Two instances of the same mistake, both in the hand chain:
+  - the **wrist bone's world matrix** was built as `inv(forearm) . P_hand . rest_world[wrist]`,
+    with the rest matrix' **translation** included. Rig rest positions are absolute body
+    coordinates (the wrist is ~6 un from the rig origin) and the skin is `cur_world . ibm`, so the
+    translation does **not** cancel: the hand mesh landed at `wrist + scale . Rw . p_rest`. Fix:
+    use the **rotation only** of the rest matrix (translation zeroed), which makes the skin exactly
+    `T(wrist) . S(s) . Rw . T(-p_rest)` — rotate the hand about its own wrist and put the wrist
+    where the IK put it;
+  - the **palm centre was stored as an absolute rig coordinate** (`wrist + fwd*0.55d`), and the hand
+    frame it feeds has its **origin at the wrist**; the ~6 units were added again, this time to the
+    **weapon**, which is mounted on that frame — the pistol left the hand and floated ~27 un away.
+    Fix: store it **relative to the wrist**.
+  - **What made this findable** was refusing to judge by eye: the report now prints, on every
+    sheet, the distance between **where the skinned mesh lands** and **where the math says it
+    should** — `mao: wrist slip 0.00/0.00 un | palm centre 0.00/0.00 un` — plus `braco: target vs
+    reach and elbow bend`, which separates "the arm is at full stretch because the target is far"
+    from "the chain is wrong". Both must read `0.00`; they are the regression test for the class
+    (mesh-in-the-wrong-place with a healthy skeleton), which no bone-length check would catch.
+  - Also fixed: the **synthetic-hand fixture had two copies** (the drawing path and the state path),
+    so they could disagree; now there is one `synth_hand_fill()`. And the fixture placed the support
+    hand **outside the arm's reach**, forcing a straight arm that looks "stretched" in the sheets;
+    `synth_dist` is now 16 un (reach is ~22), i.e. inside it.
+  - Verified: `mao:` and `braco:` at `0.00`, `encaixe` unchanged (barrel 0.0°, grip 0.00 un, 7.48 un
+    = 19.0 cm), `walk` still **8/8**, flat mode untouched, build warning count unchanged. The
+    contact sheets were re-rendered: the arms are now geometry of normal thickness with a bent
+    elbow, and the hand grips the pistol.
 - [ ] 🟢 **6.7c Registered debt (out of this stage)**: **gesture-based reload/grenade pin**,
   wrist roll on the weapon (forearm twist), haptics, sound, buy menu in VR, dropped weapon
   collision and the **remaining weapon classes** (rifle/SMG etc., which stay on the game viewmodel).
