@@ -37,6 +37,9 @@ __pycache__/
 /tmp/
 .video_agent/
 
+# Estado de sessão das ferramentas de desenvolvimento (não é conteúdo do projeto)
+.zcode/
+
 # Builds dos Mods (fontes ficam em mods/*/; binários vão para game/mods/)
 mods/null/*.so
 mods/vr/*.so

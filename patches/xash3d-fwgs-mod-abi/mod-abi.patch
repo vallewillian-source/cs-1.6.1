@@ -1,0 +1,2427 @@
+diff --git a/common/ref_params.h b/common/ref_params.h
+index 3537ce2..0eab732 100644
+--- a/common/ref_params.h
++++ b/common/ref_params.h
+@@ -92,6 +92,10 @@ typedef struct ref_overview_s
+ #define RF_DRAW_CUBEMAP	(1<<1)		// special 6x pass to render cubemap\skybox sides
+ #define RF_DRAW_OVERVIEW	(1<<2)		// overview mode is active
+ #define RF_ONLY_CLIENTDRAW	(1<<3)		// nothing is drawn by the engine except clientDraw functions
++#define RF_VIEWPORT_ABSOLUTE	(1<<4)		// game mods: viewport já está em pixels absolutos do alvo de render (não escalar pela janela)
++#define RF_FOV_ASYM		(1<<5)		// game mods: usar fov_asym (frustum fora de centro) no lugar de fov_x/fov_y
++#define RF_NO_VIEWMODEL		(1<<6)		// game mods (v6): não desenhar o viewmodel do jogo (o Mod desenha o dele)
++#define RF_VIEWMODEL_WORLD	(1<<7)		// game mods (v6): viewmodel com depth NORMAL — ocluído pelo mundo. Sem esta flag o ref aplica o hack VIEWMODEL_DEPTH_RANGE, que existe para a arma nunca cortar na parede
+ 
+ // intermediate struct for viewpass (or just a single frame)
+ typedef struct ref_viewpass_s
+@@ -102,6 +106,12 @@ typedef struct ref_viewpass_s
+ 	int		viewentity;	// entitynum (P2: Savior uses this)
+ 	float		fov_x, fov_y;	// vertical & horizontal FOV
+ 	int		flags;		// if !=0 nothing is drawn by the engine except clientDraw functions
++	float		fov_asym[4];	// game mods: frustum do olho fora de centro, em RADIANOS e no
++					// sinal do OpenXR (left e down negativos, right e up
++					// positivos). Só vale com RF_FOV_ASYM. É o que a ótica
++					// canted/por olho exige: fov_x/fov_y só expressam frustum
++					// centralizado e o render sairia diferente do que o
++					// compositor do headset assume.
+ } ref_viewpass_t;
+ 
+ #endif//REF_PARAMS_H
+diff --git a/engine/client/cl_main.c b/engine/client/cl_main.c
+index 39e4f9c..66de18f 100644
+--- a/engine/client/cl_main.c
++++ b/engine/client/cl_main.c
+@@ -807,6 +807,11 @@ static void CL_CreateCmd( void )
+ 	Platform_PreCreateMove();
+ 	clgame.dllFuncs.CL_CreateMove( host.frametime, cmd, active );
+ 	IN_EngineAppendMove( host.frametime, cmd, active );
++	// game mods (ABI v5): o Mod sobrescreve ângulos/movimento/botões. Vem por
++	// último de propósito — depois do CL_CreateMove do cliente (que lê
++	// mouse/teclado) e antes do CL_PredictMovement abaixo, então o que o Mod
++	// escreve é o que vai no usercmd enviado ao servidor e na predição.
++	IN_ModAppendMove( cmd, active );
+ 
+ 	CL_PopPMStates();
+ 
+diff --git a/engine/client/cl_scrn.c b/engine/client/cl_scrn.c
+index 6c550c7..87d4482 100644
+--- a/engine/client/cl_scrn.c
++++ b/engine/client/cl_scrn.c
+@@ -19,6 +19,7 @@ GNU General Public License for more details.
+ #include "qfont.h"
+ #include "input.h"
+ #include "library.h"
++#include "modloader.h" // game mods (modloader.c)
+ 
+ CVAR_DEFINE_AUTO( scr_centertime, "2.5", 0, "centerprint hold time" );
+ CVAR_DEFINE_AUTO( scr_loading, "0", 0, "loading bar progress" );
+@@ -675,6 +676,8 @@ void SCR_UpdateScreen( void )
+ 
+ 	if( !V_PreRender( )) return;
+ 
++	Mods_BeginFrame(); // game mods (display capability): antes do render 3D
++
+ 	switch( cls.state )
+ 	{
+ 	case ca_disconnected:
+@@ -701,7 +704,13 @@ void SCR_UpdateScreen( void )
+ 	// (assuming levelshots are off) and drawing 2d on top of nothing or cleared screen
+ 	// is ugly, specifically with Adreno and ImgTec GPUs
+ 	if( screen_redraw || !cls.changelevel || !cls.changedemo )
++	{
++		// (v8: o antigo Mods_HudFrame virou o intercâmbio CL_ModHud/Mods_Hud, que
++		// roda no começo do frame — o cursor do menu precisa valer antes)
+ 		V_PostRender();
++	}
++
++	Mods_EndFrame(); // game mods (display capability): pós-render
+ }
+ 
+ /*
+diff --git a/engine/client/cl_view.c b/engine/client/cl_view.c
+index c1b3ef1..b45154b 100644
+--- a/engine/client/cl_view.c
++++ b/engine/client/cl_view.c
+@@ -21,6 +21,7 @@ GNU General Public License for more details.
+ #include "sound.h"
+ #include "input.h" // touch
+ #include "platform/platform.h" // GL_UpdateSwapInterval
++#include "modloader.h" // game mods (modloader.c)
+ 
+ /*
+ ===============
+@@ -393,6 +394,7 @@ void V_RenderView( void )
+ 	static ref_params_t	rp;
+ 	ref_viewpass_t	rvp;
+ 	int		viewnum = 0;
++	int		eye, eyes = Mods_EyeCount(); // game mods: 2 = estéreo
+ 
+ 	if( !cl.video_prepped || ( !ui_renderworld.value && UI_IsVisible() && !cl.background ))
+ 		return; // still loading
+@@ -404,29 +406,87 @@ void V_RenderView( void )
+ 	SCR_DirtyScreen();
+ 	ref.dllFuncs.GL_BackendStartFrame ();
+ 
+-	do
++	for( eye = 0; eye < eyes; eye++ )
+ 	{
+-		clgame.dllFuncs.pfnCalcRefdef( &rp );
++		viewnum = 0;
+ 
+-		// client dll may replace viewmodel in pfnCalcRefdef, so set animtime again
+-		// V_SetupViewModel did it only for the model known before this call
+-		if( clgame.viewent.model && clgame.viewent.model->type == mod_studio )
+-			clgame.viewent.curstate.animtime = cl.local.weaponstarttime;
+-
+-		V_GetRefParams( &rp, &rvp );
+-		V_RefApplyOverview( &rvp );
+-		V_ApplyRefUnderwater( &rvp );
+-
+-		if( viewnum == 0 && FBitSet( rvp.flags, RF_ONLY_CLIENTDRAW ))
++		do
+ 		{
+-			ref.dllFuncs.R_ClearScreen();
+-		}
+-
+-		GL_RenderFrame( &rvp );
+-		S_UpdateFrame( &rvp );
+-		viewnum++;
++			clgame.dllFuncs.pfnCalcRefdef( &rp );
++
++			// client dll may replace viewmodel in pfnCalcRefdef, so set animtime again
++			// V_SetupViewModel did it only for the model known before this call
++			if( clgame.viewent.model && clgame.viewent.model->type == mod_studio )
++				clgame.viewent.curstate.animtime = cl.local.weaponstarttime;
++
++			V_GetRefParams( &rp, &rvp );
++			V_RefApplyOverview( &rvp );
++			V_ApplyRefUnderwater( &rvp );
++			Mods_Camera( &rvp, eye ); // game mods (display): view override por olho
++
++			// game mods (v6): arma na mão. Vem DEPOIS do Mods_Camera de propósito:
++			// o rvp->flags já está montado (V_GetRefParams ZERA as flags, então o
++			// Mod não pode ser consultado antes dele) e ainda dá tempo de escrever
++			// o clgame.viewent antes do render deste olho. É POR OLHO porque o
++			// pfnCalcRefdef acima roda de novo a cada pass e reescreve a origem do
++			// viewmodel — sem reaplicar, no segundo olho a arma voltaria para o
++			// meio da cabeça.
++			{
++				mod_viewmodel_t vm;
++
++				memset( &vm, 0, sizeof( vm ));
++				vm.eye = eye;
++				// olho CENTRAL, sem roomscale nem afastamento entre os olhos: a
++				// arma é um objeto único no mundo e os dois olhos têm de vê-la no
++				// mesmo lugar (o vieworigin do rvp já traz o offset por olho)
++				VectorCopy( rp.vieworg, vm.player_origin );
++				VectorCopy( clgame.viewent.origin, vm.origin );
++				VectorCopy( clgame.viewent.angles, vm.angles );
++
++				if( clgame.viewent.model )
++					Q_strncpy( vm.model_name, clgame.viewent.model->name, sizeof( vm.model_name ));
++
++				if( Mods_ViewModel( &vm ))
++				{
++					if( vm.hide )        SetBits( rvp.flags, RF_NO_VIEWMODEL );
++					if( vm.world_depth ) SetBits( rvp.flags, RF_VIEWMODEL_WORLD );
++
++					if( vm.has_origin )
++						VectorCopy( vm.origin, clgame.viewent.origin );
++
++					if( vm.has_angles )
++					{
++						// o client DLL espelha os ângulos em curstate/latched
++						// (view.cpp:377) — repetir aqui mantém o studio render e a
++						// interpolação coerentes com o que o Mod pediu
++						VectorCopy( vm.angles, clgame.viewent.angles );
++						VectorCopy( vm.angles, clgame.viewent.curstate.angles );
++						VectorCopy( vm.angles, clgame.viewent.latched.prevangles );
++					}
++				}
++			}
++
++			if( viewnum == 0 && FBitSet( rvp.flags, RF_ONLY_CLIENTDRAW ))
++			{
++				ref.dllFuncs.R_ClearScreen();
++			}
++
++			GL_RenderFrame( &rvp );
++
++			if( eye == 0 )
++				S_UpdateFrame( &rvp );
++
++			viewnum++;
++
++		} while( rp.nextView );
++	}
+ 
+-	} while( rp.nextView );
++	Mods_AfterEyes(); // game mods: bind do framebuffer da janela antes do 2D
++	// Se o Mod desenhou algo por aqui (o painel dos menus), ele pode ter bindado
++	// texturas cruas que o cache do ref não viu — invalida só nesse caso, para
++	// não pagar um re-bind a mais de todas as texturas num frame comum.
++	if( CL_HudWantsCanvas())
++		ref.dllFuncs.R_InvalidateTextures();
+ 
+ 	// draw debug triangles on a server
+ 	SV_DrawDebugTriangles ();
+@@ -524,6 +584,83 @@ static void R_ShowTree( void )
+ 	Con_NPrintf( 0, "max recursion %d\n", world.max_recursion );
+ }
+ 
++/*
++==================
++CL_ModHud
++
++HUD/UI 2D (ABI v8). Um lugar por frame, no começo dele (Host_Frame, antes do
++input frame — é isso que faz o cursor valer para o frame que está começando):
++
++  1. monta os FATOS que o Mod não tem como saber: há menu aberto? qual é o
++     tamanho do espaço 2D? a textura do canvas do frame passado?
++  2. chama Mods_Hud — o Mod devolve se quer o canvas e onde está o cursor dele
++     (o ponteiro do controle que o VR usa como mouse);
++  3. aplica: liga/desliga o cursor virtual (que os DOIS consumidores de cursor do
++     engine leem) e guarda o pedido de canvas para o V_PostRender.
++
++"Menu aberto" é `cls.key_dest == key_menu`: o menu do ESC (mainui) e os menus do
++client — time, classe, compra — todos marcam KEY_MENU ao abrir, então este
++predicado cobre esc/m/b sem precisar perguntar nada a ninguém. De propósito NÃO é
++`!= key_game`: isso incluiria o CONSOLE (key_console) e o modo de mensagem, e aí
++abrir o console ligaria o painel do headset sem menu nenhum dentro dele.
++
++Sem Mod de HUD (jogo flat, -mod null) NADA disto tem efeito: o cursor volta a ser
++o do SO e o 2D segue indo direto para a janela.
++==================
++*/
++static mod_hud_t cl_hud;
++
++void CL_ModHud( void )
++{
++	memset( &cl_hud, 0, sizeof( cl_hud ));
++	cl_hud.size = sizeof( cl_hud );
++
++	cl_hud.menu_open = ( cls.key_dest == key_menu ) ? 1 : 0;
++	cl_hud.ui_visible = UI_IsVisible() ? 1 : 0;
++	// o espaço 2D do engine: é nele que o mouse do SO chega escalado
++	// (Platform_GetMousePos × refState.scale_x) e é o tamanho que o ref usa na
++	// projeção 2D — ou seja, é também o tamanho do canvas
++	cl_hud.canvas_w = refState.width;
++	cl_hud.canvas_h = refState.height;
++
++	if( ref.initialized )
++		ref.dllFuncs.R_HudCanvasInfo( (int *)&cl_hud.canvas_tex, NULL, NULL );
++
++	if( !Mods_Hud( &cl_hud ))
++	{
++		// não há Mod de HUD: o mouse do SO manda e o 2D vai para a janela
++		IN_SetVirtualCursor( false, 0, 0 );
++		return;
++	}
++
++	// debug (hud_ptr_test): força o canvas DEPOIS do Mod — o override de teste
++	// tem de vencer a decisão do Mod, senão um Mod inativo (VR desligado) zera o
++	// pedido e o caminho do canvas nunca é exercitado (ver IN_HudPointerTest)
++	if( IN_HudPointerTestActive())
++		cl_hud.want_canvas = 1;
++
++	// O Mod só manda o ponteiro quando quer, e o engine só obedece com MENU
++	// ABERTO: fora de menu não há UI no comando e obedecer seria sequestrar o
++	// mouse do jogo por engano (o jogo normal tem de ficar intocado).
++	if( cl_hud.has_pointer && cl_hud.menu_open )
++	{
++		IN_SetVirtualCursor( true, (int)cl_hud.x, (int)cl_hud.y );
++		IN_SetVirtualButton( cl_hud.buttons & 1 );
++	}
++	else
++	{
++		IN_SetVirtualCursor( false, 0, 0 );
++		IN_SetVirtualButton( 0 );
++	}
++}
++
++qboolean CL_HudWantsCanvas( void )
++{
++	// dupla trava de propósito: o Mod decide, e o engine só aceita com menu
++	// aberto — um Mod com bug não pode sequestrar o caminho 2D do jogo inteiro
++	return ( cl_hud.want_canvas && cl_hud.menu_open ) ? true : false;
++}
++
+ /*
+ ==================
+ V_PostRender
+@@ -533,15 +670,19 @@ V_PostRender
+ void V_PostRender( void )
+ {
+ 	qboolean		draw_2d = false;
++	qboolean		canvas = CL_HudWantsCanvas();
+ 
+ 	ref.dllFuncs.R_AllowFog( false );
+ 	ref.dllFuncs.R_Set2DMode( true );
+ 
++	// HUD do jogo: SEMPRE direto na JANELA — nunca no canvas. O painel do headset
++	// mostra SÓ os menus; desenhado no canvas, o HUD (ícone de zona de compra,
++	// radar, mira, vida/munição) aparecia POR CIMA do menu de compra dentro do
++	// headset, atrapalhando a leitura. Mesma ordem de sempre: HUD antes dos menus.
+ 	if( cls.state == ca_active && cls.signon == SIGNONS && cls.scrshot_action != scrshot_mapshot )
+ 	{
+ 		SCR_TileClear();
+ 		CL_DrawHUD( CL_ACTIVE );
+-		VGui_Paint();
+ 	}
+ 
+ 	switch( cls.scrshot_action )
+@@ -553,6 +694,10 @@ void V_PostRender( void )
+ 		break;
+ 	}
+ 
++	// overlays de diagnóstico do engine (r_speeds, netgraph, showtris, gravação de
++	// demo, HUD do changelevel...): JANELA, fora do canvas — também não são menu e
++	// dentro do painel apareceriam por cima dele. É a mesma ordem do upstream:
++	// estes vinham antes dos menus.
+ 	if( draw_2d )
+ 	{
+ 		SCR_RSpeeds();
+@@ -568,7 +713,36 @@ void V_PostRender( void )
+ 		CL_DrawHUD( CL_CHANGELEVEL );
+ 		ref.dllFuncs.R_ShowTextures();
+ 		R_ShowTree();
++	}
++
++	// Canvas 2D (v8): só os MENUS deste frame vão para um alvo offscreen cuja
++	// textura o Mod desenha no headset. DEPOIS do R_Set2DMode de propósito: é ele
++	// que resolve os render targets internos (r_scene_scale/msaa) e monta a
++	// projeção 2D — e o canvas tem exatamente o tamanho do espaço 2D, então
++	// viewport e ortho continuam válidos nele.
++	if( canvas )
++		ref.dllFuncs.R_HudCanvasBegin();
++
++	// menus do VGUI do engine e do mainui (o menu de compra do `b`, o de time e o
++	// de pausa do esc): este é o conteúdo do painel
++	if( cls.state == ca_active && cls.signon == SIGNONS && cls.scrshot_action != scrshot_mapshot )
++	{
++		VGui_Paint();
++	}
++
++	if( draw_2d )
+ 		UI_UpdateMenu( host.realtime );
++
++	// fim do canvas (v8): devolve os menus capturados para a JANELA (com blend,
++	// para o mundo que está lá aparecer nas áreas transparentes do painel). ANTES
++	// do SCR_MakeScreenShot de propósito: o print da tela é conteúdo do jogador e
++	// tem de mostrar o menu. Depois disto o 2D está de volta na janela, então o
++	// Mods_Overlay2D (painel de debug do Mod) desenha por cima como sempre.
++	if( canvas )
++		ref.dllFuncs.R_HudCanvasEnd();
++
++	if( draw_2d )
++	{
+ 		Con_DrawVersion();
+ 		Con_DrawConsole();
+ 		Con_DrawDebug(); // must be last
+@@ -581,6 +755,14 @@ void V_PostRender( void )
+ 	SCR_MakeScreenShot();
+ 	ref.dllFuncs.R_AllowFog( true );
+ 	Platform_SetTimer( 0.0f );
++
++	// game mods (hud capability): overlay 2D. Único ponto depois de todo o
++	// desenho 2D (HUD, menus, console) e antes do swap — então o Mod pode
++	// pintar por cima da UI. Depois do SCR_MakeScreenShot de propósito: o
++	// overlay é diagnóstico de tela, não conteúdo de captura.
++	Mods_Overlay2D();
++	ref.dllFuncs.R_InvalidateTextures(); // o Mod pode ter bindado textura crua
++
+ 	ref.dllFuncs.R_EndFrame();
+ 
+ 	V_CheckGammaEnd();
+diff --git a/engine/client/client.h b/engine/client/client.h
+index 2d6faf7..910afea 100644
+--- a/engine/client/client.h
++++ b/engine/client/client.h
+@@ -1006,6 +1006,13 @@ qboolean V_PreRender( void );
+ void V_PostRender( void );
+ void V_RenderView( void );
+ 
++// cl_view.c — HUD/UI 2D (ABI v8 dos Mods). Roda 1x por frame em Host_Frame,
++// ANTES do input frame: monta os fatos (menu aberto, canvas), chama Mods_Hud e
++// aplica as decisões do Mod (cursor do menu + canvas 2D do frame). Ver mod_hud_t.
++void CL_ModHud( void );
++// o Mod pediu (e há menu aberto): este frame desenha o 2D no canvas offscreen
++qboolean CL_HudWantsCanvas( void );
++
+ //
+ // cl_pmove.c
+ //
+diff --git a/engine/client/dll_int/cl_game.c b/engine/client/dll_int/cl_game.c
+index a29e935..7124388 100644
+--- a/engine/client/dll_int/cl_game.c
++++ b/engine/client/dll_int/cl_game.c
+@@ -2872,6 +2872,9 @@ static int GAME_EXPORT pfnServerCmdUnreliable( char *szCmdString )
+ =============
+ pfnGetMousePos
+ 
++Nota (ABI v8): passa pelo IN_GetCursorPos para que o cursor VIRTUAL (ponteiro
++laser do Mod VR) valha também aqui — todo leitor de cursor absoluto do engine
++obedece ao mesmo override, senão um deles reposiciona por cima do outro.
+ =============
+ */
+ static void GAME_EXPORT pfnGetMousePos( struct tagPOINT *ppt )
+@@ -2880,7 +2883,7 @@ static void GAME_EXPORT pfnGetMousePos( struct tagPOINT *ppt )
+ 		return;
+ 
+ 	int x, y;
+-	Platform_GetMousePos( &x, &y );
++	IN_GetCursorPos( &x, &y );
+ 
+ 	ppt->x = x;
+ 	ppt->y = y;
+@@ -3754,6 +3757,23 @@ static IVoiceTweak gVoiceApi =
+ 	Voice_GetControlFloat,
+ };
+ 
++/*
++=============
++CL_GetMousePosition
++
++Slot GetMousePosition do cl_enginefunc_t — é o que o client DLL usa para mover
++o cursor dos menus dele (HUD_Frame → g_pMenu->MouseMove). Wrapper para casar a
++assinatura void(int*,int*) do slot e, principalmente, para o cursor VIRTUAL do
++Mod VR (ABI v8) valer aqui: este caminho e o UI_MouseMove são os DOIS
++consumidores de cursor do engine e precisam ler a MESMA posição, senão um
++reposiciona por cima do outro e o hover do menu pisca.
++=============
++*/
++static void GAME_EXPORT CL_GetMousePosition( int *mx, int *my )
++{
++	IN_GetCursorPos( mx, my );
++}
++
+ // engine callbacks
+ static cl_enginefunc_t gEngfuncs =
+ {
+@@ -3806,7 +3826,7 @@ static cl_enginefunc_t gEngfuncs =
+ 	pfnGetClientMaxspeed,
+ 	COM_CheckParm,
+ 	Key_Event,
+-	Platform_GetMousePos,
++	CL_GetMousePosition, // v8: obedece ao cursor virtual do Mod (era Platform_GetMousePos)
+ 	pfnIsNoClipping,
+ 	CL_GetLocalPlayer,
+ 	CL_GetViewModel,
+diff --git a/engine/client/dll_int/cl_gameui.c b/engine/client/dll_int/cl_gameui.c
+index 30fb334..ad0409c 100644
+--- a/engine/client/dll_int/cl_gameui.c
++++ b/engine/client/dll_int/cl_gameui.c
+@@ -66,12 +66,22 @@ void UI_UpdateMenu( float realtime )
+ 
+ void UI_KeyEvent( int key, qboolean down )
+ {
++	// rastro de debug (só com developer): é o que responde "o clique do cursor
++	// virtual chegou ao menu?" sem recompilar nada
++	Con_DPrintf( "UI_KeyEvent key=%d down=%d\n", key, down ? 1 : 0 );
++
+ 	if( !gameui.hInstance ) return;
+ 	gameui.dllFuncs.pfnKeyEvent( key, down );
+ }
+ 
+ void UI_MouseMove( int x, int y )
+ {
++	// nota (ABI v8): este é o caminho do cursor dos menus do ENGINE; o cursor
++	// virtual do Mod (ponteiro laser) chega aqui já resolvido em
++	// IN_GetCursorPos. O rastro fica atrás de `developer` (roda com -dev 1) para
++	// diagnosticar "o menu não segue o ponteiro" sem recompilar nada.
++	Con_DPrintf( "UI_MouseMove %d %d\n", x, y );
++
+ 	if( !gameui.hInstance ) return;
+ 	gameui.dllFuncs.pfnMouseMove( x, y );
+ }
+diff --git a/engine/client/input.h b/engine/client/input.h
+index ef8f4a6..3305ef3 100644
+--- a/engine/client/input.h
++++ b/engine/client/input.h
+@@ -40,6 +40,17 @@ void IN_DeactivateMouse( void );
+ void IN_MouseSavePos( void );
+ void IN_MouseRestorePos( void );
+ void IN_ToggleClientMouse( int newstate, int oldstate );
++// cursor virtual (ABI v8 do Mod): a posição absoluta 2D do cursor do menu passa
++// a vir do Mod (ponteiro do controle) em vez do mouse do SO. IN_GetCursorPos é o
++// ponto ÚNICO lido pelos DOIS consumidores de cursor do engine (o UI_MouseMove
++// daqui e o GetMousePosition que o client DLL usa nos menus dele).
++// IN_SetVirtualButton clica na BORDA (o engine vira K_MOUSE1 → UI_KeyEvent).
++qboolean IN_GetCursorPos( int *x, int *y );
++void IN_SetVirtualCursor( qboolean active, int x, int y );
++void IN_SetVirtualButton( int down );
++// debug (hud_ptr_test): o cliente usa para forçar o canvas 2D sem Mod, validando
++// o caminho canvas/cursor/clique num run flat
++qboolean IN_HudPointerTestActive( void );
+ void IN_GyroInit( void );
+ void IN_GyroCheckAvailability( void );
+ void IN_GyroEvent( vec3_t data );
+@@ -49,6 +60,9 @@ void IN_GyroDrawDebug( void );
+ uint IN_CollectInputDevices( void );
+ void IN_LockInputDevices( qboolean lock );
+ void IN_EngineAppendMove( float frametime, usercmd_t *cmd, qboolean active );
++// game mods (ABI v5): aplica a amostra de input do Mod no usercmd, depois do
++// client DLL e da IN_EngineAppendMove (ver input.c)
++void IN_ModAppendMove( usercmd_t *cmd, qboolean active );
+ 
+ void IN_SetRelativeMouseMode( qboolean set );
+ void IN_SetMouseGrab( qboolean set );
+diff --git a/engine/client/input/in_keys.c b/engine/client/input/in_keys.c
+index 2203268..2766b94 100644
+--- a/engine/client/input/in_keys.c
++++ b/engine/client/input/in_keys.c
+@@ -18,6 +18,7 @@ GNU General Public License for more details.
+ #include "client.h"
+ #include "vgui_draw.h"
+ #include "platform/platform.h"
++#include "modloader.h" // game mods: Mods_Key (v7)
+ 
+ typedef struct
+ {
+@@ -698,6 +699,14 @@ void GAME_EXPORT Key_Event( int key, int down )
+ {
+ 	key = Key_Rotate( key );
+ 
++	// game mods (v7, capability MOD_CAP_KEYS): o Mod vê a tecla ANTES de tudo —
++	// teclado virtual, console, menu, binds e cliente DLL — e pode consumi-la
++	// (é assim que uma UI de calibração de VR pega o teclado sem a tecla vazar
++	// para o jogo). Fica depois do Key_Rotate de propósito: o keynum que chega
++	// ao Mod é o mesmo que o jogo veria.
++	if( Mods_Key( key, down ))
++		return;
++
+ 	if( OSK_KeyEvent( key, down ) )
+ 		return;
+ 
+diff --git a/engine/client/input/input.c b/engine/client/input/input.c
+index 09dfa2a..a993e05 100644
+--- a/engine/client/input/input.c
++++ b/engine/client/input/input.c
+@@ -25,6 +25,7 @@ GNU General Public License for more details.
+ #include "vgui_draw.h"
+ #include "cursor_type.h"
+ #include "platform/platform.h"
++#include "modloader.h" // game mods: amostra de input do Mod (Mods_GetInput)
+ 
+ static qboolean	in_mouseactive;				// false when not focus app
+ static qboolean	in_mouseinitialized;
+@@ -34,6 +35,22 @@ static struct
+ } in_lastvalidpos;
+ static qboolean	in_mouse_savedpos;
+ static int in_mstate = 0;
++
++// Cursor VIRTUAL (ABI v8 do Mod): o ponteiro laser dos menus no VR.
++//
++// O cursor de menu tem DOIS consumidores e os dois leem a posição absoluta do
++// mouse: o do engine (IN_MouseMove → UI_MouseMove, aqui embaixo) e o do client
++// DLL (HUD_Frame → g_pMenu->MouseMove, através do GetMousePosition que o engine
++// publica em cl_game.c). Se só um dos dois fosse trocado, o outro reposicionaria
++// o cursor por cima e o hover do menu piscaria entre os dois. Por isso o
++// override mora em IN_GetCursorPos: um lugar decide, os dois obedecem.
++//
++// Com o cursor virtual ativo o mouse do SO é IGNORADO (não é somado nem
++// comparado) — é o que permite um ponteiro de controle dirigir o menu sem o
++// mouse físico atrapalhar.
++static qboolean	in_vcursor_on;
++static int	in_vcursor_x, in_vcursor_y;
++static qboolean	in_vcursor_btn;	// botão esquerdo sintético que ESTE código apertou
+ static struct inputstate_s
+ {
+ 	float lastpitch, lastyaw;
+@@ -51,6 +68,7 @@ static CVAR_DEFINE_AUTO( cl_sidespeed, "400", FCVAR_ARCHIVE | FCVAR_CLIENTDLL |
+ 
+ static CVAR_DEFINE_AUTO( m_grab_debug, "0", FCVAR_PRIVILEGED, "show debug messages on mouse state change" );
+ CVAR_DEFINE_AUTO( touch_enable, DEFAULT_TOUCH_ENABLE, FCVAR_ARCHIVE | FCVAR_FILTERABLE, "enable touch controls" );
++static CVAR_DEFINE_AUTO( hud_ptr_test, "0", FCVAR_PRIVILEGED, "debug: pilota o cursor virtual do menu sem Mod (0=off, 1=varre e clica)" );
+ 
+ /*
+ ================
+@@ -331,6 +349,199 @@ void IN_DeactivateMouse( void )
+ 
+ 
+ 
++/*
++================
++IN_GetCursorPos
++
++Posição ABSOLUTA do cursor no espaço 2D do engine, em pixels de render — a
++mesma unidade que o menu usa (mainui clampa em ScreenWidth/Height e o client
++DLL repassa para o g_pMenu->MouseMove). Com o cursor virtual ativo (VR/menus) o
++mouse do SO não é consultado; senão é o comportamento de sempre.
++
++Devolve true quando a posição veio do cursor virtual.
++================
++*/
++qboolean IN_GetCursorPos( int *x, int *y )
++{
++	if( in_vcursor_on )
++	{
++		if( x ) *x = in_vcursor_x;
++		if( y ) *y = in_vcursor_y;
++		return true;
++	}
++
++	Platform_GetMousePos( x, y );
++	return false;
++}
++
++/*
++================
++IN_SetVirtualCursor
++
++Chamado pelo modloader/cliente (ABI v8). Ativa/desativa o cursor virtual e dá
++a posição. Desativar SOLTA o botão sintético: sem isto, um clique que estava
++pressionado quando o menu fechou ficaria preso no in_mstate e o jogo seguiria
++com MOUSE1 apertado (o engine só limpa isso em IN_ClearMouseState).
++================
++*/
++void IN_SetVirtualCursor( qboolean active, int x, int y )
++{
++	if( !active && in_vcursor_btn )
++		IN_MouseEvent( 0, 0 ); // solta antes de sair
++
++	in_vcursor_on = active;
++
++	if( active )
++	{
++		in_vcursor_x = x;
++		in_vcursor_y = y;
++	}
++}
++
++/*
++================
++IN_SetVirtualButton
++
++Botão esquerdo do cursor virtual. O engine gera o evento só na BORDA (o menu
++baseia o hover na posição e a ativação no KeyDownEvent/KeyUpEvent).
++================
++*/
++void IN_SetVirtualButton( int down )
++{
++	qboolean want = down ? true : false;
++
++	if( want == in_vcursor_btn )
++		return;
++
++	in_vcursor_btn = want;
++	IN_MouseEvent( 0, want ? 1 : 0 );
++}
++
++/*
++================
++IN_HudPointerTestActive
++
++Ligado quando o cvar de debug hud_ptr_test está em uso. Serve para o cliente
++(CL_ModHud) forçar o canvas 2D mesmo sem Mod nenhum pedindo — é assim que o
++caminho canvas → cursor → clique é validado num run flat, com um menu de verdade
++aberto por comando (`togglemenu`). Nunca ligado em uso normal.
++================
++*/
++qboolean IN_HudPointerTestActive( void )
++{
++	return ( hud_ptr_test.value > 0.0f ) ? true : false;
++}
++
++/*
++================
++IN_HudPointerTest
++
++Debug (cvar hud_ptr_test, off por padrão): pilota o cursor VIRTUAL do menu sem
++Mod nenhum — varre a tela e dá um clique por volta. É a única forma de validar o
++caminho canvas → cursor → clique (UI_MouseMove / K_MOUSE1 → UI_KeyEvent) num run
++sem headset: abre-se o menu por comando (`togglemenu`) e se lê o log/o print.
++
++Não misturar com VR ligado: os dois escreveriam o mesmo cursor.
++================
++*/
++static void IN_HudPointerTest( void )
++{
++	// espaço 2D do engine (o mesmo em que o mouse do SO chega: ver
++	// Platform_GetMousePos × refState.scale_x)
++	const float w = (float)refState.width, h = (float)refState.height;
++	const float t = fmodf( (float)host.realtime * 0.20f, 2.0f ); // 10 s por volta
++	const float phase = ( t < 1.0f ? t : 2.0f - t );             // vai e volta
++	// varredura em DOIS eixos (períodos diferentes) de propósito: os menus do
++	// jogo são uma lista vertical, então só um X deslizante nunca passaria por
++	// mais de um item e o hover não poderia ser observado
++	const float tv = fmodf( (float)host.realtime * ( 2.0f / 7.0f ), 2.0f );
++	const float phasev = ( tv < 1.0f ? tv : 2.0f - tv );
++	int x = (int)( w * ( 0.15f + 0.70f * phase ));
++	int y = (int)( h * ( 0.40f + 0.35f * phasev ));
++	// janela do clique: em vez de clicar no meio da varredura (onde não há item
++	// nenhum), estaciona em cima do item "Resume" do menu de pausa — se o clique
++	// valer, o menu FECHA e o engine volta para key_game (o teste loga a
++	// transição, que é a prova de que o clique chegou ao item). A janela é no
++	// FIM da volta (t > 0,92) de propósito: no começo o carregamento do mapa
++	// ainda está em curso e o próprio spawn fecha o menu no meio do clique
++	const bool click_win = ( t >= 0.92f );
++	int btn;
++
++	if( click_win )
++	{
++		x = (int)( w * 0.16f ); // ~307 px: dentro do rótulo dos itens
++		y = (int)( h * 0.30f ); // ~324 px: sobre "Resume"
++	}
++
++	btn = click_win ? 1 : 0;
++	static int last_x = -1;
++	static int last_btn = -1;
++	static int last_dest = -1;
++
++	// modo 2 (hud_ptr_test 2): além de dirigir o cursor, ABRE e FECHA o menu
++	// sozinho — é o que torna possível validar o caminho inteiro (canvas →
++	// cursor → clique) sem nenhuma entrada do usuário, já que comandos depois de
++	// `+map` na linha de comando se perdem no carregamento do mapa.
++	//
++	// modo 3 (hud_ptr_test 3): abre o menu de COMPRA de verdade pelo comando de
++	// cliente `showvguimenu 28` (MENU_BUY — o mesmo caminho da tecla `b`) e o
++	// deixa aberto. É o conteúdo REAL que o painel do headset mostra, com o HUD
++	// do jogo desenhado por cima — o que se quer medir num dump do canvas.
++	if( hud_ptr_test.value >= 2.0f && cls.state == ca_active )
++	{
++		const float cyc = fmodf( (float)host.realtime, 24.0f ); // 24 s por ciclo
++		static qboolean menu_real_once;
++
++		if( hud_ptr_test.value >= 3.0f )
++		{
++			// espera o spawn assentar (o spawn fecha menu) e abre UMA vez
++			if( host.realtime > 6.0 && !menu_real_once )
++			{
++				menu_real_once = true;
++				Cbuf_AddText( "showvguimenu 28\n" );
++			}
++		}
++		else if( cyc > 3.0f && cyc < 18.0f )
++		{
++			if( cls.key_dest == key_game )
++				UI_SetActiveMenu( true ); // abre (mesmo caminho do ESC)
++		}
++		else if( cls.key_dest == key_menu )
++		{
++			UI_SetActiveMenu( false ); // fecha
++		}
++	}
++
++	// fora de menu não há cursor de UI para dirigir (e o mouse look não passa
++	// por aqui: ele usa os deltas relativos)
++	if( cls.key_dest == key_game )
++	{
++		IN_SetVirtualCursor( false, 0, 0 );
++		return;
++	}
++
++	IN_SetVirtualCursor( true, x, y );
++	IN_SetVirtualButton( btn );
++
++	// o estado do menu é a evidência de que o teste está no caminho certo: sem
++	// menu aberto não há canvas, não há UI para o clique e o virtual não vale
++	if( (int)cls.key_dest != last_dest )
++	{
++		last_dest = cls.key_dest;
++		Con_Printf( "hud_ptr_test: key_dest=%s (menu visivel=%d) em %.1fs\n",
++			cls.key_dest == key_game ? "game" : ( cls.key_dest == key_menu ? "menu" : "console" ),
++			UI_IsVisible() ? 1 : 0, host.realtime );
++	}
++
++	if( abs( x - last_x ) > (int)( w / 16 ) || btn != last_btn )
++	{
++		last_x = x;
++		last_btn = btn;
++		Con_Printf( "hud_ptr_test: cursor virtual (%d,%d) em %dx%d%s\n", x, y, refState.width,
++			refState.height, btn ? " + CLIQUE" : "" );
++	}
++}
++
+ /*
+ ================
+ IN_MouseMove
+@@ -350,9 +561,14 @@ static void IN_MouseMove( void )
+ 		return;
+ 	}
+ 
+-	// find mouse movement
++	// debug: o cursor virtual pode ser pilotado pelo engine (sem Mod). Roda
++	// SEMPRE (mesmo em key_game) — é ele que abre o menu no modo 2.
++	if( hud_ptr_test.value > 0.0f )
++		IN_HudPointerTest();
++
++	// find mouse movement (cursor virtual quando o Mod manda, ver acima)
+ 	int x, y;
+-	Platform_GetMousePos( &x, &y );
++	IN_GetCursorPos( &x, &y );
+ 
+ 	// touchscreen moves the cursor on its own, don't drag it back to where the mouse is left
+ 	if( x == oldx && y == oldy )
+@@ -464,6 +680,7 @@ void IN_Init( void )
+ 	Cvar_RegisterVariable( &cl_forwardspeed );
+ 	Cvar_RegisterVariable( &cl_backspeed );
+ 	Cvar_RegisterVariable( &cl_sidespeed );
++	Cvar_RegisterVariable( &hud_ptr_test );
+ 
+ 	if( !Host_IsDedicated() )
+ 	{
+@@ -652,6 +869,91 @@ void IN_EngineAppendMove( float frametime, usercmd_t *cmd, qboolean active )
+ 	}
+ }
+ 
++/*
++================
++IN_ModAppendMove
++
++Aplica a amostra de input do Mod (ABI v5) no usercmd do frame.
++
++Chamado do CL_CreateCmd logo depois do CL_CreateMove do cliente e da
++IN_EngineAppendMove — de propósito DEPOIS do client DLL, que é quem lê
++mouse/teclado e escreve cmd->buttons por atribuição: assim o Mod vence o
++mouse na mira sem precisar desativá-lo (ele continua navegando menus, que
++caem no corte de cls.key_dest abaixo) e sem tocar no caminho do teclado.
++
++O movimento só é assumido quando o stick saiu da deadzone (valor != 0). Com o
++stick centrado o que veio do teclado permanece — teclado segue como fallback.
++
++"Orientado pela cabeça" não precisa de matemática aqui: o pmove monta o
++wishdir com AngleVectors( cmd.viewangles ) e zera wishvel[2] no chão, então
++basta o Mod injetar o yaw do HMD com o stick cru em forwardmove/sidemove.
++================
++*/
++void IN_ModAppendMove( usercmd_t *cmd, qboolean active )
++{
++	mod_input_sample_t s;
++	float forward, side, up, speed;
++
++	if( !active || cls.key_dest != key_game || cl.paused || cl.intermission )
++		return;
++
++	if( !Mods_GetInput( &s ))
++		return;
++
++	if( s.has_viewangles_abs )
++	{
++		vec3_t angles;
++
++		VectorCopy( s.viewangles_abs, angles );
++		// mesma trava do CL_CreateMove do cliente (cl_pitchup/cl_pitchdown = 89):
++		// o render pode olhar mais longe (o Mod_Camera usa a pose crua do HMD),
++		// mas o que vai ao servidor fica dentro do que o jogo aceita.
++		angles[PITCH] = bound( -89.0f, angles[PITCH], 89.0f );
++		VectorCopy( angles, cmd->viewangles );
++		VectorCopy( angles, cl.viewangles );
++	}
++
++	forward = s.move_forward * cl_forwardspeed.value;
++	side    = s.move_side * cl_sidespeed.value;
++
++	// cl_upspeed e cl_movespeedkey são registrados pelo client DLL; se ele não
++	// estiver carregado (ou a variável sumir), caímos nos defaults do GoldSrc
++	// em vez de zerar o movimento.
++	{
++		float upspeed = Cvar_VariableValue( "cl_upspeed" );
++
++		if( upspeed <= 0.0f )
++			upspeed = 320.0f;
++
++		up = s.move_up * upspeed;
++	}
++
++	if( FBitSet( s.buttons_state, MOD_BTN_WALK ))
++	{
++		speed = Cvar_VariableValue( "cl_movespeedkey" );
++		if( speed <= 0.0f || speed > 1.0f )
++			speed = 0.52f; // valor do +speed do CS
++
++		forward *= speed;
++		side    *= speed;
++		up      *= speed;
++	}
++
++	if( s.move_forward != 0.0f ) cmd->forwardmove = forward;
++	if( s.move_side    != 0.0f ) cmd->sidemove    = side;
++	if( s.move_up      != 0.0f ) cmd->upmove      = up;
++
++	// bits de usercmd do protocolo GoldSrc (common/const.h:643-658). MOD_BTN_MENU
++	// não tem bit equivalente: quem trata é o próprio Mod.
++	if( FBitSet( s.buttons_state, MOD_BTN_ATTACK ))  cmd->buttons |= IN_ATTACK;
++	if( FBitSet( s.buttons_state, MOD_BTN_ATTACK2 )) cmd->buttons |= IN_ATTACK2;
++	if( FBitSet( s.buttons_state, MOD_BTN_JUMP ))    cmd->buttons |= IN_JUMP;
++	if( FBitSet( s.buttons_state, MOD_BTN_USE ))     cmd->buttons |= IN_USE;
++	if( FBitSet( s.buttons_state, MOD_BTN_RELOAD ))  cmd->buttons |= IN_RELOAD;
++	if( FBitSet( s.buttons_state, MOD_BTN_CROUCH ))  cmd->buttons |= IN_DUCK;
++	if( FBitSet( s.buttons_state, MOD_BTN_SCORE ))   cmd->buttons |= IN_SCORE;
++}
++
+ static void IN_Commands( void )
+ {
+ #if XASH_USE_EVDEV
+diff --git a/engine/common/host.c b/engine/common/host.c
+index f04c5f9..5c53403 100644
+--- a/engine/common/host.c
++++ b/engine/common/host.c
+@@ -31,6 +31,7 @@ GNU General Public License for more details.
+ #include "netchan.h"
+ #include "protocol.h"
+ #include "mod_local.h"
++#include "modloader.h" // game mods (modloader.c)
+ #include "xash3d_mathlib.h"
+ #include "input.h"
+ #include "enginefeatures.h"
+@@ -666,13 +667,20 @@ void Host_Frame( double time )
+ 	if( host.framecount == 0 )
+ 		Con_DPrintf( "Time to first frame: %.3f seconds\n", t1 - host.starttime );
+ 
++	Mods_FramePre( host.realtime ); // game mods (modloader.c)
++	// HUD/UI 2D (ABI v8): fatos do frame → Mod_Hud → cursor do menu e pedido de
++	// canvas. ANTES do input frame de propósito: o cursor tem de valer para o
++	// frame que está começando (é o Host_InputFrame que o entrega ao menu).
++	CL_ModHud();
+ 	Host_InputFrame ();  // input frame
++	Mods_Input ();       // game mods: injeção de input (v1: coleta apenas)
+ 	Host_ClientBegin (); // begin client
+ 	Host_GetCommands (); // dedicated in
+ 	Host_ServerFrame (); // server frame
+ 	Host_ClientFrame (); // client frame
+ 	HTTP_Run();			 // both server and client
+ 	XRcon_Frame();
++	Mods_FramePost( host.realtime ); // game mods
+ 
+ 	host.framecount++;
+ 	host.pureframetime = Platform_DoubleTime() - t1;
+@@ -1302,6 +1310,7 @@ int EXPORT Host_Main( int argc, char **argv, const char *progname, int bChangeGa
+ 
+ 	host.change_game = false;	// done
+ 	Cbuf_ExecStuffCmds();	// execute stuffcmds (commandline)
++	Mods_Init();	// game mods: parse "-mod <name>" e carregar (modloader.c)
+ 	SCR_CheckStartupVids();	// must be last
+ 
+ #ifndef XASH_DEDICATED
+@@ -1385,6 +1394,7 @@ void Host_ShutdownWithReason( const char *reason )
+ 
+ 	SoundList_Shutdown();
+ 	Mod_Shutdown();
++	Mods_Shutdown(); // game mods (unload limpo antes das subsystemas de rede)
+ 	XRcon_Shutdown();
+ 	NET_Shutdown();
+ 	HTTP_Shutdown();
+diff --git a/engine/common/mod_api.h b/engine/common/mod_api.h
+new file mode 100644
+index 0000000..037e4f7
+--- /dev/null
++++ b/engine/common/mod_api.h
+@@ -0,0 +1,281 @@
++/*
++mod_api.h — contrato público entre o engine e os Mods externos (v1).
++
++Um "Mod" aqui é uma biblioteca compartilhada carregada com `-mod <nome>`,
++NÃO é um game dir e NÃO tem relação com os carregadores de modelos
++(mod_alias.c, mod_bmodel.c etc.). Um Mod exporta um único símbolo:
++
++    const mod_api_t *ModGetAPI( void );
++
++O engine resolve os hooks declarados em `capabilities`; hooks ausentes ou
++capability não declarada simplesmente não são chamados. Campos futuros
++devem ser adicionados SEMPRE no fim da struct, com incremento de
++MOD_API_VERSION. Ver docs/MODS.md (workspace) para o guia completo.
++
++Este header é autocontido: não depende de nenhum header do engine, e é
++consumido tanto pelo engine quanto pelos fontes dos Mods (mods/).
++*/
++#ifndef MOD_API_H
++#define MOD_API_H
++
++#define MOD_API_VERSION 8 // v2 (Fase 2): Mod_EyeCount, Mod_AfterEyes, mod_view_t.viewport
++                          // v3: Mod_Overlay2D (2D pronto, antes do swap)
++                          // v4: mod_view_t.fov_asym/has_fov_asym (frustum por olho fora de centro)
++                          // v5 (Fase 3): mod_input_sample_t.move_up/viewangles_abs/has_viewangles_abs
++                          //     — e o engine passou a APLICAR a amostra (antes só coletava)
++                          // v6 (Fase 6): mod_viewmodel_t + Mod_ViewModel — o Mod leva a arma
++                          //     para a mão (sobrescreve origem/ângulos do viewmodel) e escolhe
++                          //     o depth (ocludida pelo mundo) ou escondê-la
++                          // v7: Mod_Key — o Mod vê a tecla antes de qualquer handler do engine
++                          //     e pode CONSUMIR (UI de calibração por teclado)
++                          // v8 (Fase 4): mod_hud_t + Mod_Hud — o engine entrega os fatos do
++                          //     frame (menu aberto, canvas 2D, tamanho) e o Mod decide: quer o
++                          //     2D num canvas offscreen e qual é a posição/clique do CURSOR do
++                          //     menu (ponteiro laser). Substitui Mod_HudRedirect/Mod_HudPointer,
++                          //     que nunca foram fiados (eram só declaração).
++
++// capabilities — o que o Mod declara que quer receber
++#define MOD_CAP_DISPLAY  (1u<<0)  // camera override por olho + begin/end frame (render)
++#define MOD_CAP_INPUT    (1u<<1)  // injeta input por frame (movimento/botões/ângulos)
++#define MOD_CAP_HUD      (1u<<2)  // notificações do pipeline 2D (HUD/menus)
++#define MOD_CAP_KEYS     (1u<<3)  // v7: recebe os eventos de teclado e pode consumi-los
++
++// keynums do engine entregues em Mod_Key (v7). Teclas IMPRIMÍVEIS chegam como
++// ASCII minúsculo ('a' = 97) — e o engine mapeia por SCANCODE, não por layout,
++// então '['/']' são as TECLAS onde o layout americano as tem. As especiais que
++// uma UI de calibração costuma querer ficam fixadas aqui dentro (o Mod não
++// enxerga engine/keydefs.h: este header é autocontido de propósito).
++#define MOD_KEY_F1       135
++#define MOD_KEY_F9       143
++#define MOD_KEY_DEL      148
++#define MOD_KEY_PGDN     149
++#define MOD_KEY_PGUP     150
++#define MOD_KEY_HOME     151
++#define MOD_KEY_END      152
++
++// botões virtuais (mod_input_sample_t.buttons_state / buttons_changed)
++#define MOD_BTN_ATTACK   (1u<<0)
++#define MOD_BTN_ATTACK2  (1u<<1)
++#define MOD_BTN_JUMP     (1u<<2)
++#define MOD_BTN_USE      (1u<<3)
++#define MOD_BTN_RELOAD   (1u<<4)
++#define MOD_BTN_CROUCH   (1u<<5)
++#define MOD_BTN_WALK     (1u<<6)
++#define MOD_BTN_SCORE    (1u<<7)
++#define MOD_BTN_MENU     (1u<<8)  // ESC virtual (abre/fecha menu/console)
++
++// APIs do engine entregues ao Mod no Mod_Init. Extensível: campos novos
++// sempre no fim; `size` permite ao Mod detectar o quanto o engine oferece.
++typedef struct mod_engine_api_s
++{
++	int          size;            // sizeof( mod_engine_api_t ) do engine
++	void       (*Printf)( const char *fmt, ... );   // log do engine (console)
++	double     (*DoubleTime)( void );               // tempo real, segundos
++	const char *engine_version;                      // ex.: "0.21"
++} mod_engine_api_t;
++
++// Câmera por olho (capability MOD_CAP_DISPLAY).
++// O engine preenche com a view atual; o Mod pode sobrescrever
++// vieworigin/viewangles/fov_x/fov_y (graus). `projection` é somente saída
++// no v1: o engine ainda não injeta matriz externa (fase 2 do plano VR).
++typedef struct mod_view_s
++{
++	int   eye;               // 0 = mono/olho esquerdo, 1 = olho direito
++	float vieworigin[3];
++	float viewangles[3];     // pitch, yaw, roll
++	float fov_x, fov_y;      // graus
++	float projection[16];    // coluna-major; engine ignora no v1
++	int   has_projection;    // 1 se o Mod preencheu `projection`
++	int   viewport[4];       // v2: se o Mod mudar, vira viewport absoluto em
++	                         // pixels do alvo de render (flag RF_VIEWPORT_ABSOLUTE)
++	float fov_asym[4];       // v4: frustum do olho fora de centro, em RADIANOS e
++	                         // no sinal do OpenXR (left/down negativos, right/up
++	                         // positivos). Com has_fov_asym=1 o engine desenha com
++	                         // estes limites em vez de fov_x/fov_y — exigido pela
++	                         // ótica canted do headset (fov_x/fov_y só fazem
++	                         // frustum centralizado e o render sairia diferente do
++	                         // que o compositor assume).
++	int   has_fov_asym;      // 1 se o Mod preencheu fov_asym
++} mod_view_t;
++
++// Contexto gráfico do engine, entregue no Mod_BeginFrame (v1: ponteiros
++// crus do backend SDL usado pelo engine).
++typedef struct mod_gl_ctx_s
++{
++	void *window;      // SDL_Window *
++	void *gl_context;  // SDL_GLContext
++} mod_gl_ctx_t;
++
++// Injeção de input (capability MOD_CAP_INPUT). O Mod preenche uma amostra
++// por frame, no Mod_Input (chamado em Host_Frame, ANTES de o usercmd do frame
++// ser montado); o engine aplica a amostra no CL_CreateCmd, logo depois do
++// CL_CreateMove do cliente e da IN_EngineAppendMove — portanto o Mod vence o
++// mouse/teclado e o que ele escreve aqui é o que vai no usercmd enviado ao
++// servidor e na predição.
++//
++// Considere a amostra ZERADA a cada frame: o Mod só deve preencher o que quer
++// controlar. Um campo em zero significa "não mexo nisso" para movimento
++// (o teclado segue valendo), mas `has_viewangles_abs` é sempre decisão do Mod.
++typedef struct mod_input_sample_s
++{
++	float        move_forward, move_side;      // -1..1, no referencial do yaw injetado (cabeça)
++	float        viewangles_delta[2];          // yaw, pitch (graus, este frame) — v1
++	unsigned int buttons_state;                // bitmask MOD_BTN_*
++	unsigned int buttons_changed;              // bits que mudaram neste frame
++	// v5
++	float        move_up;                      // -1..1 vertical. Vai para o upmove do jogo,
++	                                           // que no chão é ignorado (o pmove zera
++	                                           // wishvel[2]) e vale em água/espectador.
++	float        viewangles_abs[3];            // pitch, yaw, roll ABSOLUTOS em graus.
++	                                           // Absoluto e não delta porque a pose do HMD
++	                                           // já é uma orientação absoluta: com delta o
++	                                           // Mod brigaria com o mouse e com o
++	                                           // CL_AdjustAngles do cliente. Roll deve ficar
++	                                           // em 0 — o jogo o ignora, e o roll do render
++	                                           // vem do Mod_Camera (por olho).
++	int          has_viewangles_abs;           // 1 = usar viewangles_abs (VR); 0 = delta do v1
++} mod_input_sample_t;
++
++// Viewmodel — a arma na mão (capability MOD_CAP_DISPLAY, v6).
++//
++// O engine pré-preenche a ENTRADA com o que o client DLL montou neste frame e
++// chama o Mod; o Mod ajusta o que quiser e marca a SAÍDA. O engine então aplica
++// no clgame.viewent e nas flags do ref_viewpass_t do olho corrente.
++//
++// Por que a entrada vem pronta: a ORIENTAÇÃO do viewmodel já é a convenção de
++// cada modelo — o client DLL a deriva dos ângulos da view em V_CalcGunAngle
++// (inclusive o pitch invertido e o roll de idle). Reconstruir isso do zero
++// seria adivinhar; o Mod deve NUDGE, não refazer.
++//
++// Chamado POR OLHO: o client DLL reescreve o viewmodel a cada pass de olho
++// (pfnCalcRefdef), então uma sobrescrita feita só no primeiro olho seria
++// desfeita no segundo. O Mod precisa ser idempotente dentro do frame.
++typedef struct mod_viewmodel_s
++{
++	float player_origin[3];   // ENTRADA: olho CENTRAL do player no mundo — sem
++	                          // o offset de roomscale e sem o afastamento entre
++	                          // os olhos. A arma é UM objeto no mundo: os dois
++	                          // olhos têm de vê-la no mesmo lugar, senão a
++	                          // estereoscopia da arma sai errada (é por isso que
++	                          // a base aqui NÃO é o vieworigin do rvp, que já
++	                          // traz o offset por olho).
++	float origin[3];          // ENTRADA/SAÍDA: origem do viewmodel, como o
++	                          // client DLL a escreveu → o Mod sobrescreve os 3
++	                          // e marca has_origin
++	float angles[3];          // ENTRADA/SAÍDA: ângulos do viewmodel (mesma ideia)
++	char  model_name[64];     // ENTRADA: nome do modelo, ex. "v_ak47.mdl" — dá
++	                          // para afinar o encaixe por classe de arma
++	int   eye;                // ENTRADA: olho do pass corrente (0 ou 1)
++
++	int   has_origin;         // SAÍDA: 1 = aplicar origin[]
++	int   has_angles;         // SAÍDA: 1 = aplicar angles[] (espelhado também em
++	                          // curstate.angles e latched.prevangles, como o
++	                          // client DLL faz em view.cpp)
++	int   world_depth;        // SAÍDA: 1 = depth NORMAL: a arma é ocluída pelo
++	                          // mundo. Sem isto vale o hack VIEWMODEL_DEPTH_RANGE
++	                          // do ref, cujo propósito é a arma NUNCA cortar na
++	                          // parede — exatamente o oposto do que VR quer
++	int   hide;               // SAÍDA: 1 = não desenhar o viewmodel do jogo
++	                          // (para um Mod que desenhe a própria arma/mãos)
++} mod_viewmodel_t;
++
++// HUD/UI 2D — menus no headset e ponteiro laser (capability MOD_CAP_HUD, v8).
++//
++// Um hook só, no mesmo estilo do mod_viewmodel_t: o ENGINE PREENCHE A ENTRADA
++// com os fatos do frame e o Mod marca as SAÍDAS. Chamado 1x por frame em
++// Host_Frame, DEPOIS do Mod_FramePre (as poses já são deste frame) e ANTES do
++// input frame e do desenho 2D — é essa posição na ordem que faz o cursor e o
++// clique valerem para o frame que está começando.
++//
++// Por que os fatos vêm do engine: "tem menu aberto" é `cls.key_dest != key_game`
++// (o menu do ESC e os menus do client — time, classe, compra — todos marcam
++// KEY_MENU ao abrir), e o tamanho do espaço 2D é do engine. O Mod não tem como
++// saber nenhum dos dois, e a POLÍTICA (desenhar painel? ligar o laser?) é do Mod.
++typedef struct mod_hud_s
++{
++	int      size;          // sizeof( mod_hud_t ) do engine
++
++	// --- ENTRADA (engine) ---
++	int      menu_open;     // 1 = há UI de tela cheia no comando (key_dest != key_game)
++	int      ui_visible;    // UI_IsVisible() (menu principal do mainui)
++	int      canvas_w;      // espaço 2D do engine em pixels (= resolução do render)
++	int      canvas_h;
++	unsigned canvas_tex;    // textura do canvas 2D preenchido no frame anterior
++	                        // (0 = ainda não existe: o Mod pula o desenho)
++
++	// --- SAÍDA (Mod) ---
++	int      want_canvas;   // 1 = quero o desenho 2D deste frame num framebuffer
++	                        // offscreen. Sem isto o 2D vai direto para a janela,
++	                        // como sempre foi (é o caminho do jogo flat).
++	int      has_pointer;   // 1 = o cursor do menu é MEU: o engine usa x/y como a
++	                        // posição absoluta do mouse e ignora o mouse do SO
++	                        // (os DOIS consumidores: UI_MouseMove e o
++	                        // GetMousePosition que o client DLL usa nos menus dele)
++	float    x, y;          // pixels do espaço 2D (canvas_w/canvas_h)
++	int      buttons;       // BIT(0) = botão esquerdo. O engine gera o clique na
++	                        // BORDA (K_MOUSE1 → UI_KeyEvent) — o Mod só descreve o
++	                        // estado; segurar o botão = botão preso, como no mouse.
++} mod_hud_t;
++
++typedef struct mod_api_s
++{
++	// identidade
++	int          api_version;   // tem que ser exatamente MOD_API_VERSION
++	const char  *mod_name;
++	unsigned int capabilities;  // bitmask MOD_CAP_*
++
++	// lifecycle
++	int  (*Mod_Init)( const mod_engine_api_t *eng );   // 0 = recusa de load
++	void (*Mod_Shutdown)( void );
++
++	// frame (sempre chamados, independem de capabilities)
++	void (*Mod_FramePre)( double time );
++	void (*Mod_FramePost)( double time );
++
++	// capability MOD_CAP_DISPLAY
++	void (*Mod_Camera)( mod_view_t *view );            // por view pass (por olho)
++	int  (*Mod_BeginFrame)( const mod_gl_ctx_t *ctx ); // antes do render 3D
++	void (*Mod_EndFrame)( void );                      // após o render 2D
++
++	// capability MOD_CAP_INPUT
++	void (*Mod_Input)( mod_input_sample_t *sample );   // 1x por frame
++
++	// capability MOD_CAP_HUD
++	// v8: troca os antigos Mod_HudRedirect/Mod_HudPointer (declaração sem
++	// fiamento) por um único intercâmbio por frame. Ver mod_hud_t.
++	void (*Mod_Hud)( mod_hud_t *hud );                 // 1x por frame, antes do input
++
++	// v2 (capability MOD_CAP_DISPLAY)
++	int  (*Mod_EyeCount)( void );  // passes por frame: 1 = mono, 2 = estéreo
++	void (*Mod_AfterEyes)( void ); // após o loop de olhos, antes do desenho 2D
++
++	// v3 (capability MOD_CAP_HUD)
++	// Último ponto de desenho do frame: HUD, menus, console e placar já foram
++	// desenhados e o swap ainda não aconteceu — o que o Mod desenhar aqui
++	// aparece POR CIMA da UI do jogo (e, no VR, só na janela: o alvo dos olhos
++	// é outro framebuffer, e o submit ao runtime acontece em Mod_EndFrame).
++	// Também é onde um overlay de debug da tela 2D deve morar.
++	void (*Mod_Overlay2D)( void );
++
++	// v6 (capability MOD_CAP_DISPLAY)
++	// Arma na mão: reposiciona o viewmodel no mundo e escolhe o depth. Chamado
++	// em V_RenderView DEPOIS de Mods_Camera — o rvp->flags já está montado
++	// (V_GetRefParams ZERA as flags, então o Mod não pode ser chamado antes
++	// dele) e ainda dá tempo de escrever clgame.viewent antes do render do
++	// olho. Ver mod_viewmodel_t para o contrato de entrada/saída.
++	void (*Mod_ViewModel)( mod_viewmodel_t *vm );
++
++	// v7 (capability MOD_CAP_KEYS)
++	// Evento de teclado, chamado no topo do Key_Event do engine — DEPOIS de
++	// Key_Rotate (o keynum já está no espaço do jogo) e ANTES de qualquer
++	// handler: teclado virtual (OSK), console, menu, cliente DLL e binds.
++	// Devolver 1 = CONSUMIDO: o engine encerra o evento ali e a tecla não chega
++	// ao jogo. O Mod deve consumir só o que ele realmente usa (as teclas da UI
++	// de calibração) e devolver 0 em todo o resto — inclusive quando a UI está
++	// desligada, senão a tecla some do jogo sem o usuário pedir.
++	int (*Mod_Key)( int key, int down );
++} mod_api_t;
++
++typedef mod_api_t *(*ModGetAPI_t)( void );
++
++#endif // MOD_API_H
+diff --git a/engine/common/modloader.c b/engine/common/modloader.c
+new file mode 100644
+index 0000000..15ab0af
+--- /dev/null
++++ b/engine/common/modloader.c
+@@ -0,0 +1,435 @@
++/*
++modloader.c — carregador de Mods externos (game mods), fundação da
++arquitetura de mods do workspace (docs/MODS.md; plano: PLAN.md, Fase 1).
++
++Um Mod é um .so exportando ModGetAPI() (contrato em mod_api.h), carregado
++com o argumento de linha de comando "-mod <nome>". O engine procura
++
++    <rootdir>/mods/mod_<nome>.so   e   <rootdir>/mod_<nome>.so
++
++(rootdir = pasta onde o xash3d roda, ex.: game/). Sem "-mod", todas as
++funções abaixo são no-op e o comportamento do engine é inalterado.
++
++ATENÇÃO: nada aqui tem relação com os carregadores de MODELOS
++(mod_alias.c, mod_bmodel.c, mod_sprite.c, mod_studio.c) — infeliz colisão
++de vocabulário do GoldSrc ("mod" = model).
++*/
++#include "common.h"
++#include "modloader.h"
++#include "mod_api.h"
++#include <unistd.h>  // readlink (path do binário com case correto)
++#include <dlfcn.h>   // dlopen/dlsym: NÃO usar COM_LoadLibrary aqui — o
++                     // FS_FindLibrary força lowercase no path ("always in
++                     // lower case (why?)"), quebrando dlopen em paths com
++                     // maiúsculas (ex.: /home/<user>/Workspace/...).
++
++static mod_api_t *g_mod;
++static void      *g_lib;
++static char       g_modname[64];
++static mod_engine_api_t g_eng;
++static mod_gl_ctx_t     g_glctx;
++static qboolean   g_video_ready;
++
++// amostra de input do frame corrente (v5): Mods_Input faz o poll em Host_Frame;
++// o CL_CreateCmd a consome logo depois de montar o usercmd, via Mods_GetInput.
++static mod_input_sample_t g_input;
++static qboolean           g_input_valid;
++
++// contadores do engine (mod_info)
++static unsigned int cnt_pre, cnt_post, cnt_input, cnt_camera, cnt_viewmodel, cnt_begin, cnt_end, cnt_hud, cnt_hud_used, cnt_overlay, cnt_key, cnt_key_used;
++
++static void Mods_Info_f( void );
++
++qboolean Mods_Active( void )
++{
++	return g_mod != NULL;
++}
++
++const char *Mods_Name( void )
++{
++	return g_mod ? g_modname : "";
++}
++
++static void Mods_Unload( void )
++{
++	if( !g_mod )
++		return;
++
++	Con_Printf( "Mods: unloading \"%s\"\n", g_modname );
++
++	if( g_mod->Mod_Shutdown )
++		g_mod->Mod_Shutdown();
++
++	g_mod = NULL;
++
++	if( g_lib )
++	{
++		dlclose( g_lib );
++		g_lib = NULL;
++	}
++
++	g_modname[0] = 0;
++}
++
++static qboolean Mods_Load( const char *name )
++{
++	char      rootdir[MAX_OSPATH];
++	char      exedir[MAX_OSPATH];
++	char      path[2 * MAX_OSPATH];
++	char      dllname[64];
++	ModGetAPI_t getapi;
++	ssize_t   len;
++	qboolean  have_exedir = false, found = false;
++	int       i;
++
++	Q_snprintf( dllname, sizeof( dllname ), "mod_%s.so", name );
++
++	// SDL_GetBasePath (usado pelo FS) pode devolver o path com case errado
++	// e o dlopen é case-sensitive: resolver o dir do binário direto do
++	// kernel (case garantido) e validar com stat antes de carregar.
++	len = readlink( "/proc/self/exe", exedir, sizeof( exedir ) - 1 );
++
++	if( len > 0 )
++	{
++		char *slash;
++
++		exedir[len] = 0;
++		slash = Q_strrchr( exedir, '/' );
++
++		if( slash )
++		{
++			*slash = 0;
++			have_exedir = true;
++		}
++	}
++
++	g_fsapi.GetRootDirectory( rootdir, sizeof( rootdir ));
++
++	for( i = 0; i < 6 && !found; i++ )
++	{
++		const char *dir = NULL;
++		int with_mods = i % 2 == 0;
++
++		switch( i / 2 )
++		{
++		case 0: dir = have_exedir ? exedir : NULL; break;
++		case 1: dir = rootdir; break;
++		case 2: dir = "."; break;
++		}
++
++		if( !dir || COM_StringEmpty( dir ))
++			continue;
++
++		if( with_mods )
++			Q_snprintf( path, sizeof( path ), "%s/mods/%s", dir, dllname );
++		else
++			Q_snprintf( path, sizeof( path ), "%s/%s", dir, dllname );
++
++		if( g_fsapi.SysFileExists( path ))
++			found = true;
++	}
++
++	if( !found )
++	{
++		Con_Printf( S_ERROR "Mods: \"%s\" not found (tried mods/ and . next to the engine and in rootdir)\n", name );
++		return false;
++	}
++
++	g_lib = dlopen( path, RTLD_NOW | RTLD_LOCAL );
++
++	if( !g_lib )
++	{
++		const char *err = dlerror();
++		Con_Printf( S_ERROR "Mods: failed to load %s: %s\n", path, err ? err : "unknown error" );
++		return false;
++	}
++
++	getapi = (ModGetAPI_t)dlsym( g_lib, "ModGetAPI" );
++
++	if( !getapi )
++	{
++		Con_Printf( S_ERROR "Mods: %s has no ModGetAPI() symbol\n", path );
++		dlclose( g_lib );
++		g_lib = NULL;
++		return false;
++	}
++
++	g_mod = getapi();
++
++	if( !g_mod )
++	{
++		Con_Printf( S_ERROR "Mods: ModGetAPI() returned NULL\n" );
++		dlclose( g_lib );
++		g_lib = NULL;
++		return false;
++	}
++
++	if( g_mod->api_version != MOD_API_VERSION )
++	{
++		Con_Printf( S_ERROR "Mods: \"%s\" api version %d, engine supports %d\n",
++			name, g_mod->api_version, MOD_API_VERSION );
++		g_mod = NULL;
++		dlclose( g_lib );
++		g_lib = NULL;
++		return false;
++	}
++
++	Q_strncpy( g_modname, name, sizeof( g_modname ));
++
++	g_eng.size = sizeof( g_eng );
++	g_eng.Printf = Con_Printf;
++	g_eng.DoubleTime = Platform_DoubleTime;
++	g_eng.engine_version = XASH_VERSION;
++
++	Con_Printf( "Mods: loaded \"%s\" (api %d, capabilities:%s%s%s%s)\n", g_modname,
++		g_mod->api_version,
++		FBitSet( g_mod->capabilities, MOD_CAP_DISPLAY ) ? " display" : "",
++		FBitSet( g_mod->capabilities, MOD_CAP_INPUT ) ? " input" : "",
++		FBitSet( g_mod->capabilities, MOD_CAP_HUD ) ? " hud" : "",
++		FBitSet( g_mod->capabilities, MOD_CAP_KEYS ) ? " keys" : "" );
++
++	if( g_mod->Mod_Init && !g_mod->Mod_Init( &g_eng ))
++	{
++		Con_Printf( S_ERROR "Mods: \"%s\" refused to init\n", g_modname );
++		Mods_Unload();
++		return false;
++	}
++
++	return true;
++}
++
++void Mods_Init( void )
++{
++	char name[MAX_QPATH];
++
++	Cmd_AddCommand( "mod_info", Mods_Info_f, "print state of the loaded mod" );
++
++	if( !Sys_GetParmFromCmdLine( "-mod", name ))
++		return;
++
++	if( COM_StringEmpty( name ))
++	{
++		Con_Printf( S_ERROR "Mods: -mod requires a mod name\n" );
++		return;
++	}
++
++	Mods_Load( name );
++}
++
++void Mods_Shutdown( void )
++{
++	Mods_Unload();
++}
++
++void Mods_FramePre( double time )
++{
++	cnt_pre++;
++
++	if( g_mod && g_mod->Mod_FramePre )
++		g_mod->Mod_FramePre( time );
++}
++
++void Mods_FramePost( double time )
++{
++	cnt_post++;
++
++	if( g_mod && g_mod->Mod_FramePost )
++		g_mod->Mod_FramePost( time );
++}
++
++void Mods_Input( void )
++{
++	g_input_valid = false;
++
++	if( !g_mod || !FBitSet( g_mod->capabilities, MOD_CAP_INPUT ) || !g_mod->Mod_Input )
++		return;
++
++	memset( &g_input, 0, sizeof( g_input ));
++	g_mod->Mod_Input( &g_input );
++	cnt_input++;
++	g_input_valid = true;
++}
++
++/*
++================
++Mods_GetInput
++
++Entrega a amostra preenchida por Mods_Input neste frame. Chamado do
++CL_CreateCmd (via IN_ModAppendMove), que é onde a amostra vira usercmd.
++Falso quando não há Mod com MOD_CAP_INPUT ou quando o Mod não foi
++consultado neste frame.
++================
++*/
++qboolean Mods_GetInput( mod_input_sample_t *out )
++{
++	if( !g_input_valid || !g_mod )
++		return false;
++
++	*out = g_input;
++	return true;
++}
++
++void Mods_Camera( ref_viewpass_t *rvp, int eye )
++{
++	mod_view_t mv;
++	int old_vp[4];
++
++	if( !g_mod || !FBitSet( g_mod->capabilities, MOD_CAP_DISPLAY ) || !g_mod->Mod_Camera )
++		return;
++
++	cnt_camera++;
++
++	memset( &mv, 0, sizeof( mv ));
++	mv.eye = eye;
++	VectorCopy( rvp->vieworigin, mv.vieworigin );
++	VectorCopy( rvp->viewangles, mv.viewangles );
++	mv.fov_x = rvp->fov_x;
++	mv.fov_y = rvp->fov_y;
++	memcpy( mv.viewport, rvp->viewport, sizeof( mv.viewport ));
++	memcpy( old_vp, rvp->viewport, sizeof( old_vp ));
++
++	g_mod->Mod_Camera( &mv );
++
++	// o Mod pode sobrescrever a view
++	VectorCopy( mv.vieworigin, rvp->vieworigin );
++	VectorCopy( mv.viewangles, rvp->viewangles );
++	rvp->fov_x = mv.fov_x;
++	rvp->fov_y = mv.fov_y;
++
++	if( mv.has_fov_asym )
++	{
++		// frustum fora de centro por olho (v4): o ref monta a projeção com
++		// estes limites em vez de fov_x/fov_y
++		memcpy( rvp->fov_asym, mv.fov_asym, sizeof( rvp->fov_asym ));
++		SetBits( rvp->flags, RF_FOV_ASYM );
++	}
++
++	if( memcmp( mv.viewport, old_vp, sizeof( old_vp )))
++	{
++		// viewport em pixels absolutos do alvo do olho (estéreo)
++		memcpy( rvp->viewport, mv.viewport, sizeof( rvp->viewport ));
++		SetBits( rvp->flags, RF_VIEWPORT_ABSOLUTE );
++	}
++}
++
++int Mods_EyeCount( void )
++{
++	if( !g_mod || !FBitSet( g_mod->capabilities, MOD_CAP_DISPLAY ) || !g_mod->Mod_EyeCount )
++		return 1;
++
++	return bound( 1, g_mod->Mod_EyeCount(), 2 );
++}
++
++void Mods_AfterEyes( void )
++{
++	if( !g_mod || !FBitSet( g_mod->capabilities, MOD_CAP_DISPLAY ) || !g_mod->Mod_AfterEyes )
++		return;
++
++	g_mod->Mod_AfterEyes();
++}
++
++qboolean Mods_ViewModel( mod_viewmodel_t *vm )
++{
++	if( !g_mod || !FBitSet( g_mod->capabilities, MOD_CAP_DISPLAY ) || !g_mod->Mod_ViewModel )
++		return false;
++
++	cnt_viewmodel++;
++	g_mod->Mod_ViewModel( vm );
++	return true;
++}
++
++/*
++================
++Mods_Key
++
++Chamado do topo do Key_Event (in_keys.c), antes de todo handler do engine.
++True = o Mod consumiu o evento e o Key_Event encerra ali: é assim que uma UI de
++calibração de um Mod pega a tecla sem ela vazar para o console, o menu, os binds
++ou o cliente DLL.
++================
++*/
++qboolean Mods_Key( int key, int down )
++{
++	if( !g_mod || !FBitSet( g_mod->capabilities, MOD_CAP_KEYS ) || !g_mod->Mod_Key )
++		return false;
++
++	cnt_key++;
++
++	if( !g_mod->Mod_Key( key, down ))
++		return false;
++
++	cnt_key_used++;
++	return true;
++}
++
++void Mods_VideoInit( void *window, void *gl_context )
++{
++	g_glctx.window = window;
++	g_glctx.gl_context = gl_context;
++	g_video_ready = true;
++
++	Con_DPrintf( "Mods: video init (window %p, ctx %p)\n", window, gl_context );
++}
++
++void Mods_BeginFrame( void )
++{
++	if( !g_mod || !FBitSet( g_mod->capabilities, MOD_CAP_DISPLAY ) || !g_mod->Mod_BeginFrame )
++		return;
++
++	cnt_begin++;
++	g_mod->Mod_BeginFrame( g_video_ready ? &g_glctx : NULL );
++}
++
++void Mods_EndFrame( void )
++{
++	cnt_end++;
++
++	if( !g_mod || !FBitSet( g_mod->capabilities, MOD_CAP_DISPLAY ) || !g_mod->Mod_EndFrame )
++		return;
++
++	g_mod->Mod_EndFrame();
++}
++
++// v8 (HUD/UI 2D): intercâmbio de fatos/decisões por frame. O chamador
++// (CL_ModHud, no cliente) pré-preenche a ENTRADA com o que o Mod não tem como
++// saber — menu aberto, tamanho do espaço 2D, textura do canvas — e depois lê as
++// SAÍDAS (want_canvas/has_pointer/x/y/buttons). False = não há Mod de HUD.
++qboolean Mods_Hud( mod_hud_t *hud )
++{
++	if( !g_mod || !FBitSet( g_mod->capabilities, MOD_CAP_HUD ) || !g_mod->Mod_Hud )
++		return false;
++
++	cnt_hud++;
++	g_mod->Mod_Hud( hud );
++
++	if( hud->want_canvas || hud->has_pointer )
++		cnt_hud_used++;
++
++	return true;
++}
++
++void Mods_Overlay2D( void )
++{
++	if( !g_mod || !FBitSet( g_mod->capabilities, MOD_CAP_HUD ) || !g_mod->Mod_Overlay2D )
++		return;
++
++	cnt_overlay++;
++	g_mod->Mod_Overlay2D();
++}
++
++static void Mods_Info_f( void )
++{
++	if( !g_mod )
++	{
++		Con_Printf( "Mods: no mod loaded (use -mod <name>)\n" );
++		return;
++	}
++
++	Con_Printf( "mod: %s (api %d, capabilities:%s%s%s%s)\n", g_modname, g_mod->api_version,
++		FBitSet( g_mod->capabilities, MOD_CAP_DISPLAY ) ? " display" : "",
++		FBitSet( g_mod->capabilities, MOD_CAP_INPUT ) ? " input" : "",
++		FBitSet( g_mod->capabilities, MOD_CAP_HUD ) ? " hud" : "",
++		FBitSet( g_mod->capabilities, MOD_CAP_KEYS ) ? " keys" : "" );
++	Con_Printf( "hooks: frames(pre=%u post=%u) input=%u camera=%u viewmodel=%u begin=%u end=%u hud=%u(%u usados) overlay=%u key=%u(%u consumidas)\n",
++		cnt_pre, cnt_post, cnt_input, cnt_camera, cnt_viewmodel, cnt_begin, cnt_end, cnt_hud, cnt_hud_used, cnt_overlay, cnt_key, cnt_key_used );
++}
+diff --git a/engine/common/modloader.h b/engine/common/modloader.h
+new file mode 100644
+index 0000000..ec02887
+--- /dev/null
++++ b/engine/common/modloader.h
+@@ -0,0 +1,71 @@
++/*
++modloader.h — hooks do sistema de Mods externos (ver mod_api.h).
++
++Call sites no engine:
++  - Host_Init            → Mods_Init        (parse "-mod <nome>", load)
++  - Host_Frame           → Mods_FramePre / Mods_Hud / Mods_Input / Mods_FramePost
++  - Host_ShutdownWithReason → Mods_Shutdown (unload limpo)
++  - SCR_UpdateScreen     → Mods_BeginFrame / Mods_EndFrame
++  - V_RenderView         → Mods_Camera      (por view pass / por olho)
++  - V_RenderView         → Mods_ViewModel   (v6: arma na mão, pós-Mods_Camera, por olho)
++  - Key_Event (input)    → Mods_Key         (v7: tecla antes de todo handler; consumível)
++  - V_PostRender         → Mods_Overlay2D   (2D pronto, antes do swap)
++  - platform sdl2 vid    → Mods_VideoInit   (janela + contexto GL prontos)
++
++Nota (v8): Mods_Hud NÃO é mais a antiga notificação de "o 2D vai ser desenhado"
++(esse lugar era o SCR_UpdateScreen, com o nome Mods_HudFrame). Ele é o
++intercâmbio por frame que decide o canvas 2D e o cursor do menu, e por isso roda
++em Host_Frame, ANTES do input frame — assim o cursor vale para o frame que está
++começando.
++*/
++#ifndef MODLOADER_H
++#define MODLOADER_H
++
++#include "ref_params.h" // ref_viewpass_t
++#include "mod_api.h"    // mod_input_sample_t
++
++qboolean    Mods_Active( void );
++const char *Mods_Name( void );
++
++void Mods_Init( void );
++void Mods_Shutdown( void );
++
++void Mods_FramePre( double time );
++void Mods_FramePost( double time );
++// consulta o Mod 1x por frame (Host_Frame); a amostra fica guardada para o
++// CL_CreateCmd aplicar via Mods_GetInput
++void Mods_Input( void );
++// amostra do frame corrente; falso se não há Mod de input ou ele não foi
++// consultado neste frame
++qboolean Mods_GetInput( mod_input_sample_t *out );
++
++// rvp pode ser modificado pelo Mod (origem/ângulos/fov/viewport)
++void Mods_Camera( ref_viewpass_t *rvp, int eye );
++
++// arma na mão (v6): consulta o Mod com a struct pré-preenchida pelo chamador
++// (cl_view.c, que conhece clgame) e devolve true quando houve Mod de display.
++// Quem aplica origem/ângulos/flags é o chamador — o modloader não conhece o
++// cliente. Chamar DEPOIS de Mods_Camera e POR OLHO (ver mod_api.h).
++qboolean Mods_ViewModel( mod_viewmodel_t *vm );
++
++// teclado (v7): chamado no topo do Key_Event — o Mod vê a tecla antes do OSK,
++// do console, do menu e do cliente DLL. True = o Mod consumiu o evento e o
++// engine encerra o Key_Event ali (a tecla não chega ao jogo nem aos binds).
++qboolean Mods_Key( int key, int down );
++
++// estéreo: nº de passes de render por frame (1 = mono, 2 = um por olho)
++int  Mods_EyeCount( void );
++// após o loop de olhos, antes do desenho 2D (bind do framebuffer da janela)
++void Mods_AfterEyes( void );
++
++void Mods_VideoInit( void *window, void *gl_context );
++void Mods_BeginFrame( void );
++void Mods_EndFrame( void );
++// v8: HUD/UI 2D. O chamador pré-preenche a ENTRADA e lê as SAÍDAS (ver
++// mod_hud_t em mod_api.h); false = não há Mod de HUD carregado.
++qboolean Mods_Hud( mod_hud_t *hud );
++// último ponto 2D do frame: HUD/menus já desenhados, swap ainda não feito.
++// É o único lugar em que um Mod pode desenhar POR CIMA da UI do jogo.
++void Mods_Overlay2D( void );
++
++#endif // MODLOADER_H
+diff --git a/engine/platform/sdl2/vid_sdl2.c b/engine/platform/sdl2/vid_sdl2.c
+index e85afd2..8d10594 100644
+--- a/engine/platform/sdl2/vid_sdl2.c
++++ b/engine/platform/sdl2/vid_sdl2.c
+@@ -18,6 +18,7 @@ GNU General Public License for more details.
+ #include "client.h"
+ #include "vid_common.h"
+ #include "platform_sdl2.h"
++#include "modloader.h" // game mods (modloader.c)
+ 
+ // include it after because it breaks definitions in net_api.h wtf
+ #include <SDL_syswm.h>
+@@ -731,6 +732,8 @@ static rserr_t VID_CreateWindow( const int input_width, const int input_height,
+ 			goto cleanup;
+ 		}
+ 
++		Mods_VideoInit( host.hWnd, glw_state.context ); // game mods (modloader.c)
++
+ 		if( SDL_GL_MakeCurrent( host.hWnd, glw_state.context ) < 0 )
+ 		{
+ 			Con_Printf( S_ERROR "%s: SDL_GL_MakeCurrent: %s\n", __func__, SDL_GetError( ));
+diff --git a/engine/ref_api.h b/engine/ref_api.h
+index b0aa5db..245c3c3 100644
+--- a/engine/ref_api.h
++++ b/engine/ref_api.h
+@@ -664,6 +664,20 @@ typedef struct ref_interface_s
+ 
+ 	// vgui drawing implementation
+ 	void	(*VGUI_SetupDrawing)( qboolean rect );
++
++	// canvas 2D (ABI v8 do Mod): com o canvas ligado, o desenho 2D do frame vai
++	// para um alvo offscreen cuja textura é entregue ao Mod (que a desenha no
++	// headset); o End devolve o resultado para a janela. Sem o Begin, nada disto
++	// é usado e o 2D desenha na janela como sempre. R_HudCanvasInfo devolve o
++	// texnum/tamanho correntes (0 = não existe) para o Mod amostrar.
++	void	(*R_HudCanvasBegin)( void );
++	void	(*R_HudCanvasEnd)( void );
++	void	(*R_HudCanvasInfo)( int *texnum, int *width, int *height );
++	// zera o cache de textura do ref. Obrigatório depois de um Mod desenhar por
++	// conta própria: ele bindeia texturas cruas e o cache do engine (consultado
++	// por igualdade) passaria a mentir, fazendo o próximo bind do engine ser
++	// pulado — e a UI do jogo desenhar com a textura errada.
++	void	(*R_InvalidateTextures)( void );
+ } ref_interface_t;
+ 
+ typedef int (*REFAPI)( int version, ref_interface_t *pFunctionTable, ref_api_t* engfuncs, ref_globals_t *pGlobals );
+diff --git a/ref/gl/gl_context.c b/ref/gl/gl_context.c
+index d32a432..33f46a9 100644
+--- a/ref/gl/gl_context.c
++++ b/ref/gl/gl_context.c
+@@ -573,5 +573,10 @@ const ref_interface_t gReffuncs =
+ 	R_FillTriAPI,
+ 
+ 	VGUI_SetupDrawing,
++
++	R_HudCanvasBegin,
++	R_HudCanvasEnd,
++	R_HudCanvasInfo,
++	R_InvalidateTextures,
+ };
+ 
+diff --git a/ref/gl/gl_fbo.c b/ref/gl/gl_fbo.c
+index 4d063a6..c356c4b 100644
+--- a/ref/gl/gl_fbo.c
++++ b/ref/gl/gl_fbo.c
+@@ -14,6 +14,8 @@ GNU General Public License for more details.
+ */
+ 
+ #include "gl_local.h"
++#include <stdio.h>   // o dump de diagnóstico do canvas (HUD_CANVAS_DUMP) grava arquivo
++#include <stdlib.h>
+ 
+ #if !XASH_GLES || !XASH_GL_STATIC
+ static void GL_FreeRenderTarget( gl_rendertarget_t *target )
+@@ -361,7 +363,18 @@ void GL_BindScreenTarget( void )
+ 	const gl_rendertarget_t *screen = &tr.targets.screen;
+ 
+ 	if( !GL_RenderTargetsActive( ))
++	{
++		// Sem render target interno (r_scene_scale 1 / msaa 0) o 2D desenha
++		// direto na JANELA — e tem que dizer isso explicitamente. O binding
++		// herdado pode ser QUALQUER coisa: com o Mod VR ativo, o frame termina
++		// com o FBO da imagem do último olho ligado (o blit do espelho devolve
++		// o binding que achou) e, sem este bind, HUD, menus, console e placar
++		// eram desenhados DENTRO da imagem que vai para o headset — 2D na tela
++		// errada, só em um olho e ainda por cima deformado pelo compositor.
++		// O chamador (R_Set2DMode) monta viewport/ortho logo em seguida.
++		pglBindFramebuffer( GL_FRAMEBUFFER, 0 );
+ 		return;
++	}
+ 
+ 	if( glState.sceneTargetDrawn )
+ 	{
+@@ -412,4 +425,245 @@ void GL_PresentScreenTarget( void )
+ 	}
+ }
+ 
++/*
++================
++canvas 2D (HUD/menus) — ABI v8 do Mod
++
++Um alvo RGBA8 do tamanho do ESPAÇO 2D (gpGlobals->width/height, o mesmo em que
++o mouse do engine é medido), sem depth, criado SOB DEMANDA: só quando o Mod
++pede (no VR, com menu aberto). Sem Mod pedindo, este código nunca roda e o 2D
++desenha na janela como sempre desenhou.
++
++Por que existe: o 2D do jogo (HUD, menus, console) é desenhado pelo engine com
++funções de 2D — não dá para "levar o menu para o headset" sem capturar esse
++desenho em algum lugar que o Mod possa amostrar como textura. O canvas é esse
++lugar: o 2D inteiro cai nele e o Mod desenha essa textura nos olhos.
++
++Existe um segundo consumidor, o MONITOR: o 2D que foi para o canvas tem de
++voltar para a janela, senão o jogo fica sem HUD/menu na tela. R_HudCanvasEnd
++faz isso com um quad fullscreen COM blend, então o mundo que já está na janela
++(espelho do olho) continua aparecendo nas áreas transparentes do canvas.
++
++Nada aqui é permanente: o alvo é recriado quando o tamanho muda, e
++GL_FreeHudCanvas é chamado no shutdown do ref (NÃO em GL_FreeRenderTargets, que
++o GL_CheckRenderTargets chama a cada frame no caminho sem r_scene_scale).
++================
++*/
++static gl_rendertarget_t tr_hud;      // canvas 2D (só existe quando usado)
++static qboolean         tr_hud_on;    // o 2D está sendo desenhado nele agora
++
++static void GL_DumpHudCanvas( void ); // HUD_CANVAS_DUMP (definida junto do canvas)
++
++static qboolean GL_CheckHudCanvas( void )
++{
++	const int width = gpGlobals->width;
++	const int height = gpGlobals->height;
++
++	if( width <= 0 || height <= 0 )
++		return false;
++
++	if( tr_hud.fbo && tr_hud.width == width && tr_hud.height == height )
++		return true;
++
++	GL_FreeRenderTarget( &tr_hud );
++
++	if( !GL_CreateRenderTarget( &tr_hud, "*fbo_hud", width, height, 0, RT_COLOR_TEXTURE ))
++	{
++		gEngfuncs.Con_Printf( S_WARN "%s: nao consegui criar o canvas 2D %dx%d, o 2D segue na janela\n",
++			__func__, width, height );
++		return false;
++	}
++
++	gEngfuncs.Con_Reportf( "%s: canvas 2D %dx%d (texnum %d)\n", __func__, width, height, tr_hud.texnum );
++	return true;
++}
++
++void R_HudCanvasBegin( void )
++{
++	if( !GL_CheckHudCanvas( ))
++		return;
++
++	pglBindFramebuffer( GL_FRAMEBUFFER, tr_hud.fbo );
++	pglViewport( 0, 0, tr_hud.width, tr_hud.height );
++
++	// transparente: o que o 2D não pintar fica vazado (o Mod desenha o canvas
++	// com blend, então o mundo aparece atrás do painel e as áreas do HUD que não
++	// têm fundo não viram um retângulo preto na cara do usuário)
++	pglClearColor( 0.0f, 0.0f, 0.0f, 0.0f );
++	pglClear( GL_COLOR_BUFFER_BIT );
++
++	tr_hud_on = true;
++}
++
++void R_HudCanvasEnd( void )
++{
++	if( !tr_hud_on )
++		return;
++
++	tr_hud_on = false;
++
++	GL_DumpHudCanvas(); // HUD_CANVAS_DUMP: diagnóstico (uma vez, no 1º frame)
++
++	// de volta para a janela: o mundo (espelho do olho) já está lá; o canvas
++	// entra por cima com blend
++	pglBindFramebuffer( GL_FRAMEBUFFER, 0 );
++	pglViewport( 0, 0, gpGlobals->width, gpGlobals->height );
++	pglEnable( GL_BLEND );
++	pglBlendFunc( GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA );
++	pglDisable( GL_ALPHA_TEST );
++	pglDisable( GL_DEPTH_TEST );
++	pglDepthMask( GL_FALSE );
++	pglColor4f( 1.0f, 1.0f, 1.0f, 1.0f );
++	pglTexEnvi( GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, GL_MODULATE );
++
++	// o v vem invertido: o canvas tem a origem do GL (embaixo) e o espaço 2D a
++	// tem em cima — mesmo par (0,1)(1,0) do GL_DrawTargetQuad
++	R_DrawStretchPic( 0.0f, 0.0f, gpGlobals->width, gpGlobals->height, 0.0f, 1.0f, 1.0f, 0.0f, tr_hud.texnum );
++
++	pglDepthMask( GL_TRUE );
++}
++
++/*
++================
++GL_DumpHudCanvas
++
++Dump do canvas 2D para diagnóstico, atrás de HUD_CANVAS_DUMP=<arquivo.pam>
++(PAM P7, RGBA). Grava UMA vez: no primeiro frame em que o canvas é usado — que é
++exatamente o frame em que o menu abriu. É o conteúdo do painel do headset SEM o
++mundo por trás dele (o VR_PANEL_DUMP do mod_vr pega a JANELA: canvas + espelho do
++olho), então é assim que se separa "o que o jogo pintou" de "o que vazou do
++mundo através do alfa".
++
++O histograma de alfa no log responde a outra pergunta: as áreas pintadas são
++opacas (255) ou translúcidas? O painel herda esse alfa (o Mod desenha o canvas
++com SRC_ALPHA), e é isso que deixa o mundo — arma, céu — aparecer por cima do
++menu. Média de alfa 200 = o mundo entra em 20% da área do menu.
++================
++*/
++static void GL_DumpHudCanvas( void )
++{
++	static qboolean done;
++	static int frames;
++	const char *path = getenv( "HUD_CANVAS_DUMP" );
++	const char *frame = getenv( "HUD_CANVAS_DUMP_FRAME" );
++	const int at = frame ? atoi( frame ) : 1;
++	unsigned char *buf;
++	unsigned int n_zero = 0, n_low = 0, n_mid = 0, n_high = 0, n_opaque = 0;
++	unsigned long long sum = 0;
++	int x, y, w, h;
++	FILE *f;
++
++	// dump no N-ésimo frame de canvas (HUD_CANVAS_DUMP_FRAME): o 1º frame costuma
++	// ser cedo demais (menu ainda por desenhar), então dá para escolher o momento
++	frames++;
++
++	if( done || !path || !path[0] || !tr_hud.fbo || frames < ( at > 0 ? at : 1 ))
++		return;
++
++	done = true;
++
++	w = tr_hud.width;
++	h = tr_hud.height;
++
++	if( w <= 0 || h <= 0 )
++		return;
++
++	buf = malloc( (size_t)w * h * 4 );
++
++	if( !buf )
++		return;
++
++	pglPixelStorei( GL_PACK_ALIGNMENT, 1 );
++	pglReadPixels( 0, 0, w, h, GL_RGBA, GL_UNSIGNED_BYTE, buf );
++
++	for( y = 0; y < h; y++ )
++	{
++		const unsigned char *row = buf + (size_t)y * w * 4;
++
++		for( x = 0; x < w; x++ )
++		{
++			const unsigned int a = row[x * 4 + 3];
++
++			sum += a;
++
++			if( a == 0 ) n_zero++;
++			else if( a < 128 ) n_low++;
++			else if( a < 224 ) n_mid++;
++			else if( a < 255 ) n_high++;
++			else n_opaque++;
++		}
++	}
++
++	f = fopen( path, "wb" );
++
++	if( f )
++	{
++		// o PAM é escrito de baixo para cima (o glReadPixels começa na linha de
++		// baixo do FBO) — invertido aqui para o arquivo sair como a imagem aparece
++		fprintf( f, "P7\nWIDTH %d\nHEIGHT %d\nDEPTH 4\nMAXVAL 255\nTUPLTYPE RGB_ALPHA\nENDHDR\n", w, h );
++
++		for( y = h - 1; y >= 0; y-- )
++			fwrite( buf + (size_t)y * w * 4, 1, (size_t)w * 4, f );
++
++		fclose( f );
++		gEngfuncs.Con_Printf( "%s: canvas %dx%d (frame %d) salvo em %s\n", __func__, w, h, frames, path );
++	}
++	else
++	{
++		gEngfuncs.Con_Printf( S_WARN "%s: nao consegui abrir %s\n", __func__, path );
++	}
++
++	gEngfuncs.Con_Printf( "%s: alfa a=0 %u (%.1f%%) | 1..127 %u | 128..223 %u | 224..254 %u | opaco %u (%.1f%%) | media %.1f\n",
++		__func__, n_zero, 100.0 * n_zero / ( w * h ), n_low, n_mid, n_high, n_opaque,
++		100.0 * n_opaque / ( w * h ), ( double )sum / ( w * h ));
++
++	free( buf );
++}
++
++void R_HudCanvasInfo( int *texnum, int *width, int *height )
++{
++	// ATENÇÃO: o Mod precisa do id do GL (para amostrar com glBindTexture), e
++	// NÃO do índice de textura do engine — `rt->texnum` é o índice (o id do GL
++	// vive no gl_texture_t). Devolver o índice aqui daria um bind de uma textura
++	// qualquer do jogo no painel do headset (bug que o teste sem headset não
++	// pega: em flat ninguém desenha o painel).
++	if( texnum )
++	{
++		gl_texture_t *tex = tr_hud.texnum ? R_GetTexture( tr_hud.texnum ) : NULL;
++
++		*texnum = tex ? ( int )tex->texnum : 0;
++	}
++
++	if( width ) *width = tr_hud.width;
++	if( height ) *height = tr_hud.height;
++}
++
++void GL_FreeHudCanvas( void )
++{
++	GL_FreeRenderTarget( &tr_hud );
++	tr_hud_on = false;
++}
++
++/*
++================
++R_InvalidateTextures
++
++Depois que um MOD desenha por conta própria ele pode ter bindado texturas CRUAS
++(pglBindTexture com o id do GL) — coisa que o cache do ref não vê. O cache é
++consultado por igualdade (GL_Bind: "já está essa, não re-bindo"), então uma
++textura crua por cima deixa o cache MENTINDO: o próximo GL_Bind do engine com o
++texnum cacheado PULA o bind e a draw sai com a textura do Mod.
++
++Zerar o cache aqui faz o próximo GL_Bind sempre bindar de verdade. Chamar logo
++depois de cada ponto em que o Mod desenha (Mods_AfterEyes, Mods_Overlay2D) — é
++barato e é a diferença entre "o Mod desenha por cima" e "o HUD do jogo troca de
++textura sozinho".
++================
++*/
++void R_InvalidateTextures( void )
++{
++	memset( glState.currentTextures, -1, MAX_TEXTURE_UNITS * sizeof( *glState.currentTextures ));
++	memset( glState.currentTexturesIndex, 0, MAX_TEXTURE_UNITS * sizeof( *glState.currentTexturesIndex ));
++}
++
+ #endif // !XASH_GLES || !XASH_GL_STATIC
+diff --git a/ref/gl/gl_frustum.c b/ref/gl/gl_frustum.c
+index 3dcee4e..6f31e07 100644
+--- a/ref/gl/gl_frustum.c
++++ b/ref/gl/gl_frustum.c
+@@ -70,6 +70,69 @@ void GL_FrustumInitProj( gl_frustum_t *out, float flZNear, float flZFar, float f
+ 	GL_FrustumSetPlane( out, FRUSTUM_NEAR, RI.cull_vforward, DotProduct( RI.cull_vforward, nearpoint ));
+ }
+ 
++/*
++=================
++GL_FrustumInitProjAsym
++
++Mesma construção do GL_FrustumInitProj, mas com os QUATRO semi-ângulos da view
++— o frustum fora de centro de quem tem ótica canted/por olho (game mods,
++RF_FOV_ASYM). Os ângulos chegam em RADIANOS e no sinal do OpenXR (left/down
++negativos, right/up positivos), que são exatamente os números que
++R_SetupProjectionMatrix usa. Assim o culling e a imagem passam a enxergar a
++MESMA região.
++
++Por que não reaproveitar o simétrico: fov_x/fov_y só expressam um retângulo
++CENTRADO, então um frustum assimétrico só pode ser coberto por um envelope —
++sobra no lado largo e FALTA no lado estreito. Pior: os campos do engine são
++aberturas TOTAIS (ele divide por dois internamente), então quem publicar um
++meio-ângulo ali encolhe o culling à metade da abertura e o mundo desaparece nas
++beiradas (era o caso antes desta função existir).
++=================
++*/
++void GL_FrustumInitProjAsym( gl_frustum_t *out, float flZNear, float flZFar, float flAngleLeft, float flAngleRight, float flAngleUp, float flAngleDown )
++{
++	vec3_t	normal, iforward;
++	float	xs, xc;
++
++	// Cada plano é a ARESTA daquele lado, com a normal virada para DENTRO da
++	// cunha (é o lado positivo que o culling conserva). A aresta esquerda está
++	// em flAngleLeft (negativo no OpenXR) e o interior fica à direita dela, então
++	// a normal é (sen|L|, +cos|L|) no plano (frente, direita); a direita é a
++	// mesma conta com o sinal do cosseno trocado. Repare que o nome do plano
++	// aqui aponta para a aresta que ele limita — no GL_FrustumInitProj simétrico
++	// os dois acabam trocados entre si (a cunha é a mesma, simétrica).
++	SinCos( fabsf( flAngleLeft ), &xs, &xc );
++	VectorMAM( xs, RI.cull_vforward, xc, RI.cull_vright, normal );
++	GL_FrustumSetPlane( out, FRUSTUM_LEFT, normal, DotProduct( RI.cullorigin, normal ));
++
++	SinCos( flAngleRight, &xs, &xc );
++	VectorMAM( xs, RI.cull_vforward, -xc, RI.cull_vright, normal );
++	GL_FrustumSetPlane( out, FRUSTUM_RIGHT, normal, DotProduct( RI.cullorigin, normal ));
++
++	VectorNegate( RI.cull_vforward, iforward );
++
++	SinCos( fabsf( flAngleDown ), &xs, &xc );
++	VectorMAM( xs, RI.cull_vforward, xc, RI.cull_vup, normal );
++	GL_FrustumSetPlane( out, FRUSTUM_BOTTOM, normal, DotProduct( RI.cullorigin, normal ));
++
++	SinCos( flAngleUp, &xs, &xc );
++	VectorMAM( xs, RI.cull_vforward, -xc, RI.cull_vup, normal );
++	GL_FrustumSetPlane( out, FRUSTUM_TOP, normal, DotProduct( RI.cullorigin, normal ));
++
++	// setup far plane
++	vec3_t farpoint;
++	VectorMA( RI.cullorigin, flZFar, RI.cull_vforward, farpoint );
++	GL_FrustumSetPlane( out, FRUSTUM_FAR, iforward, DotProduct( iforward, farpoint ));
++
++	// no need to setup backplane for general view.
++	if( flZNear == 0.0f ) return;
++
++	// setup near plane
++	vec3_t nearpoint;
++	VectorMA( RI.cullorigin, flZNear, RI.cull_vforward, nearpoint );
++	GL_FrustumSetPlane( out, FRUSTUM_NEAR, RI.cull_vforward, DotProduct( RI.cull_vforward, nearpoint ));
++}
++
+ void GL_FrustumInitOrtho( gl_frustum_t *out, float xLeft, float xRight, float yTop, float yBottom, float flZNear, float flZFar )
+ {
+ 	// setup the near and far planes
+diff --git a/ref/gl/gl_frustum.h b/ref/gl/gl_frustum.h
+index d54ee49..6e5194a 100644
+--- a/ref/gl/gl_frustum.h
++++ b/ref/gl/gl_frustum.h
+@@ -32,6 +32,10 @@ typedef struct gl_frustum_s
+ } gl_frustum_t;
+ 
+ void GL_FrustumInitProj( gl_frustum_t *out, float flZNear, float flZFar, float flFovX, float flFovY );
++// frustum fora de centro: os QUATRO semi-ângulos da view, em RADIANOS e no sinal
++// do OpenXR (left/down negativos, right/up positivos) — os mesmos números que o
++// render usa em RF_FOV_ASYM, para o culling coincidir exatamente com a imagem
++void GL_FrustumInitProjAsym( gl_frustum_t *out, float flZNear, float flZFar, float flAngleLeft, float flAngleRight, float flAngleUp, float flAngleDown );
+ void GL_FrustumInitOrtho( gl_frustum_t *out, float xLeft, float xRight, float yTop, float yBottom, float flZNear, float flZFar );
+ 
+ // cull methods
+diff --git a/ref/gl/gl_local.h b/ref/gl/gl_local.h
+index 1e4d23e..92ea65b 100644
+--- a/ref/gl/gl_local.h
++++ b/ref/gl/gl_local.h
+@@ -353,6 +353,15 @@ void GL_BindSceneTarget( void );
+ void GL_BindScreenTarget( void );
+ void GL_BindWindowTarget( void );
+ void GL_PresentScreenTarget( void );
++// canvas 2D (ABI v8 do Mod): desvia o desenho 2D para um alvo offscreen e
++// devolve a textura ao Mod. Ver a seção no fim de gl_fbo.c.
++void R_HudCanvasBegin( void );
++void R_HudCanvasEnd( void );
++void R_HudCanvasInfo( int *texnum, int *width, int *height );
++void GL_FreeHudCanvas( void );
++// zera o cache de textura do ref: obrigatório depois de um Mod desenhar por
++// conta própria (ele bindeia cru e o cache do engine passaria a mentir)
++void R_InvalidateTextures( void );
+ #else
+ static inline void GL_CheckRenderTargets( void ) { }
+ static inline void GL_FreeRenderTargets( void ) { }
+@@ -360,6 +369,16 @@ static inline void GL_BindSceneTarget( void ) { }
+ static inline void GL_BindScreenTarget( void ) { }
+ static inline void GL_BindWindowTarget( void ) { }
+ static inline void GL_PresentScreenTarget( void ) { }
++static inline void R_HudCanvasBegin( void ) { }
++static inline void R_HudCanvasEnd( void ) { }
++static inline void R_HudCanvasInfo( int *texnum, int *width, int *height )
++{
++	if( texnum ) *texnum = 0;
++	if( width ) *width = 0;
++	if( height ) *height = 0;
++}
++static inline void GL_FreeHudCanvas( void ) { }
++static inline void R_InvalidateTextures( void ) { }
+ static inline void GL_GetSceneTargetSize( int *width, int *height )
+ {
+ 	*width = gpGlobals->width;
+diff --git a/ref/gl/gl_opengl.c b/ref/gl/gl_opengl.c
+index f05a3dd..7a14014 100644
+--- a/ref/gl/gl_opengl.c
++++ b/ref/gl/gl_opengl.c
+@@ -1384,6 +1384,7 @@ void R_Shutdown( void )
+ 
+ 	GL_RemoveCommands();
+ 	GL_FreeRenderTargets();
++	GL_FreeHudCanvas(); // canvas 2D do Mod (v8): o FBO não sobrevive ao contexto
+ 	R_ShutdownImages();
+ #if !XASH_GLES && !XASH_GL_STATIC
+ 	GL2_ShimShutdown();
+diff --git a/ref/gl/gl_rmain.c b/ref/gl/gl_rmain.c
+index 97b1211..b3e63bd 100644
+--- a/ref/gl/gl_rmain.c
++++ b/ref/gl/gl_rmain.c
+@@ -359,6 +359,17 @@ void R_SetupFrustum( void )
+ 		const ref_overview_t	*ov = gEngfuncs.GetOverviewParms();
+ 		GL_FrustumInitOrtho( &RI.frustum, ov->xLeft, ov->xRight, ov->yTop, ov->yBottom, ov->zNear, ov->zFar );
+ 	}
++	else if( FBitSet( RI.rvp.flags, RF_FOV_ASYM ))
++	{
++		// game mods (estéreo): o culling tem que enxergar a MESMA região que o
++		// render. O frustum por olho é fora de centro (ótica canted), e derivar
++		// um envelope de fov_x/fov_y não serve: sobra no lado largo e falta no
++		// estreito — o que falta não é submetido e a imagem perde geometria
++		// justamente na periferia. Usa-se então os mesmos quatro semi-ângulos de
++		// R_SetupProjectionMatrix (RF_FOV_ASYM).
++		GL_FrustumInitProjAsym( &RI.frustum, 0.0f, R_GetFarClip(), // NOTE: we ignore nearplane here (mirrors only)
++			RI.rvp.fov_asym[0], RI.rvp.fov_asym[1], RI.rvp.fov_asym[2], RI.rvp.fov_asym[3] );
++	}
+ 	else
+ 	{
+ 		GL_FrustumInitProj( &RI.frustum, 0.0f, R_GetFarClip(), RI.rvp.fov_x, RI.rvp.fov_y ); // NOTE: we ignore nearplane here (mirrors only)
+@@ -384,11 +395,28 @@ static void R_SetupProjectionMatrix( matrix4x4 m )
+ 	GLfloat zNear = 4.0f;
+ 	GLfloat zFar = Q_max( 256.0f, RI.farClip );
+ 
+-	GLfloat yMax = zNear * tan( RI.rvp.fov_y * M_PI_F / 360.0f );
+-	GLfloat yMin = -yMax;
++	GLfloat yMax, yMin, xMax, xMin;
+ 
+-	GLfloat xMax = zNear * tan( RI.rvp.fov_x * M_PI_F / 360.0f );
+-	GLfloat xMin = -xMax;
++	if( FBitSet( RI.rvp.flags, RF_FOV_ASYM ))
++	{
++		// frustum fora de centro (game mods: ótica canted do headset, um
++		// frustum por olho). Os ângulos chegam em radianos, no sinal do
++		// OpenXR — left/down negativos. Escalar cada limite por tan(ângulo)
++		// dá os quatro planos reais; um render centralizado aqui sairia
++		// esticado em relação ao que o compositor assume (e o estéreo, errado).
++		xMax = zNear * tan( RI.rvp.fov_asym[1] );
++		xMin = zNear * tan( RI.rvp.fov_asym[0] );
++		yMax = zNear * tan( RI.rvp.fov_asym[2] );
++		yMin = zNear * tan( RI.rvp.fov_asym[3] );
++	}
++	else
++	{
++		yMax = zNear * tan( RI.rvp.fov_y * M_PI_F / 360.0f );
++		yMin = -yMax;
++
++		xMax = zNear * tan( RI.rvp.fov_x * M_PI_F / 360.0f );
++		xMin = -xMax;
++	}
+ 
+ 	if( tr.rotation & 1 )
+ 	{
+@@ -541,7 +569,13 @@ void R_SetupGL( qboolean set_gl_state )
+ 
+ 	if( !set_gl_state ) return;
+ 
+-	if( !FBitSet( RI.rvp.flags, RF_DRAW_CUBEMAP ))
++	if( FBitSet( RI.rvp.flags, RF_VIEWPORT_ABSOLUTE ))
++	{
++		// game mods (estéreo): viewport já está em pixels do alvo de render
++		GL_BindSceneTarget();
++		pglViewport( RI.rvp.viewport[0], RI.rvp.viewport[1], RI.rvp.viewport[2], RI.rvp.viewport[3] );
++	}
++	else if( !FBitSet( RI.rvp.flags, RF_DRAW_CUBEMAP ))
+ 	{
+ 		int scene_width, scene_height;
+ 
+diff --git a/ref/gl/gl_studio.c b/ref/gl/gl_studio.c
+index 39873fb..6ea6f88 100644
+--- a/ref/gl/gl_studio.c
++++ b/ref/gl/gl_studio.c
+@@ -3299,6 +3299,11 @@ void R_RunViewmodelEvents( void )
+ 	if( FBitSet( RI.rvp.flags, RF_DRAW_CUBEMAP ) || ENGINE_GET_PARM( PARM_LOCAL_HEALTH ) <= 0 || !CL_IsViewEntityLocalPlayer())
+ 		return;
+ 
++	// game mods (v6): um Mod pediu para esconder o viewmodel do jogo (ele
++	// desenha a própria arma) — sem os eventos, o muzzle flash não pisca solto
++	if( FBitSet( RI.rvp.flags, RF_NO_VIEWMODEL ))
++		return;
++
+ 	RI.currententity = tr.viewent;
+ 
+ 	if( !RI.currententity->model || RI.currententity->model->type != mod_studio )
+@@ -3335,6 +3340,10 @@ void R_DrawViewModel( void )
+ 	if( FBitSet( RI.rvp.flags, RF_DRAW_CUBEMAP ) || ENGINE_GET_PARM( PARM_LOCAL_HEALTH ) <= 0 || !CL_IsViewEntityLocalPlayer())
+ 		return;
+ 
++	// game mods (v6): um Mod pediu para esconder o viewmodel do jogo
++	if( FBitSet( RI.rvp.flags, RF_NO_VIEWMODEL ))
++		return;
++
+ 	tr.blend = CL_FxBlend( view ) / 255.0f;
+ 	if( !R_ModelOpaque( view->curstate.rendermode ) && tr.blend <= 0.0f )
+ 		return; // invisible ?
+@@ -3344,8 +3353,15 @@ void R_DrawViewModel( void )
+ 	if( !RI.currententity->model )
+ 		return;
+ 
++	// game mods (v6): com RF_VIEWMODEL_WORLD o squeeze de depth sai. Ele existe
++	// justamente para a arma NUNCA cortar na parede (é desenhada por cima do
++	// mundo) — em VR é o contrário: a arma tem de ser OCLUÍDA pelo mundo, ou
++	// atravessa tudo o que você encosta.
++	qboolean vm_world = FBitSet( RI.rvp.flags, RF_VIEWMODEL_WORLD );
++
+ 	// adjust the depth range to prevent view model from poking into walls
+-	pglDepthRange( gldepthmin, gldepthmin + VIEWMODEL_DEPTH_RANGE * ( gldepthmax - gldepthmin ));
++	if( !vm_world )
++		pglDepthRange( gldepthmin, gldepthmin + VIEWMODEL_DEPTH_RANGE * ( gldepthmax - gldepthmin ));
+ 	RI.currentmodel = RI.currententity->model;
+ 
+ 	switch( RI.currententity->model->type )
+@@ -3360,7 +3376,8 @@ void R_DrawViewModel( void )
+ 	}
+ 
+ 	// restore depth range
+-	pglDepthRange( gldepthmin, gldepthmax );
++	if( !vm_world )
++		pglDepthRange( gldepthmin, gldepthmax );
+ }
+ 
+ /*
+diff --git a/ref/null/r_context.c b/ref/null/r_context.c
+index b5a373e..92137b4 100644
+--- a/ref/null/r_context.c
++++ b/ref/null/r_context.c
+@@ -49,6 +49,14 @@ static void R_SimpleStubBool( qboolean unused )
+ 	;
+ }
+ 
++// canvas 2D do Mod (v8): sem render, não existe textura nenhuma
++static void R_HudCanvasStubInfo( int *texnum, int *width, int *height )
++{
++	if( texnum ) *texnum = 0;
++	if( width ) *width = 0;
++	if( height ) *height = 0;
++}
++
+ static qboolean R_StudioFillAPI( struct engine_studio_api_s *api, struct r_studio_interface_s *pDefaultDraw )
+ {
+ 	return false;
+@@ -431,6 +439,12 @@ static const ref_interface_t gReffuncs =
+ 	.R_FillTriAPI    = R_FillTriAPI,
+ 
+ 	.VGUI_SetupDrawing   = VGUI_SetupDrawing,
++
++	// canvas 2D do Mod (v8): sem render, não há canvas
++	.R_HudCanvasBegin = R_SimpleStub,
++	.R_HudCanvasEnd   = R_SimpleStub,
++	.R_HudCanvasInfo  = R_HudCanvasStubInfo,
++	.R_InvalidateTextures = R_SimpleStub,
+ };
+ 
+ int EXPORT GetRefAPI( int version, ref_interface_t *funcs, ref_api_t *engfuncs, ref_globals_t *globals );
+diff --git a/ref/soft/r_context.c b/ref/soft/r_context.c
+index 5d6dec1..5d96e44 100644
+--- a/ref/soft/r_context.c
++++ b/ref/soft/r_context.c
+@@ -298,6 +298,28 @@ static void GAME_EXPORT R_ShowTextures( void )
+ 	// textures undone too
+ }
+ 
++// canvas 2D do Mod (v8): o renderer de software não tem FBO — o engine recebe
++// texnum 0 e o 2D continua indo para a janela, como sempre foi.
++static void GAME_EXPORT R_HudCanvasStubBegin( void )
++{
++}
++
++static void GAME_EXPORT R_HudCanvasStubEnd( void )
++{
++}
++
++static void GAME_EXPORT R_HudCanvasStubInfo( int *texnum, int *width, int *height )
++{
++	if( texnum ) *texnum = 0;
++	if( width ) *width = 0;
++	if( height ) *height = 0;
++}
++
++// não há cache de textura para invalidar no renderer de software
++static void GAME_EXPORT R_InvalidateTexturesStub( void )
++{
++}
++
+ static void GAME_EXPORT R_SetupSky( int *skyboxTextures )
+ {
+ 	// TODO: R_UnloadSkybox();
+@@ -541,5 +563,12 @@ const ref_interface_t gReffuncs =
+ 	R_FillTriAPI,
+ 
+ 	VGUI_SetupDrawing,
++
++	// canvas 2D do Mod (v8): o renderer de software não tem FBO — o engine
++	// recebe texnum 0 e o 2D continua indo para a janela.
++	R_HudCanvasStubBegin,
++	R_HudCanvasStubEnd,
++	R_HudCanvasStubInfo,
++	R_InvalidateTexturesStub,
+ };
+ 

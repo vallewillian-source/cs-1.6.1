@@ -13,6 +13,11 @@ OXR="$BASE/src/openxr-sdk/install"
 OUT="$BASE/game/mods"
 IMG="docker.io/steamcmd/steamcmd:latest"
 
+[ -f "$API/mod_api.h" ] || {
+  echo "ERRO: mod_api.h não encontrado em $API" >&2
+  echo "      clone o engine e aplique patches/xash3d-fwgs-mod-abi/ (ver docs/BUILD.md)" >&2
+  exit 1
+}
 [ -f "$OXR/lib/libopenxr_loader.so" ] || { echo "ERRO: OpenXR-SDK não buildado — rode scripts/build-openxr.sh antes"; exit 1; }
 mkdir -p "$OUT"
 

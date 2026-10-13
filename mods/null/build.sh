@@ -8,6 +8,12 @@ SRC="$BASE/mods/null"
 API="$BASE/src/xash3d-fwgs/engine/common"
 OUT="$BASE/game/mods"
 
+[ -f "$API/mod_api.h" ] || {
+  echo "ERRO: mod_api.h não encontrado em $API" >&2
+  echo "      clone o engine e aplique patches/xash3d-fwgs-mod-abi/ (ver docs/BUILD.md)" >&2
+  exit 1
+}
+
 mkdir -p "$OUT"
 
 podman run --rm --security-opt label=disable \
