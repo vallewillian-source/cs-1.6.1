@@ -17,12 +17,29 @@ atribuição**. Mesmo assim os créditos vão em `CREDITS.md` na raiz, por corte
   - `skin[0]` com **50 ossos**: `root`, `shoulder.{r,l}`, `bicep`, `forearm`, `wrist`,
     `finger_{pinky,ring,middle,index,thumb}{1,2,3}`, **`socket.{r,l}`**,
     `forearm.Twist{0,1}`, **`wrist_ik.{r,l}`**, **`arm_target.{r,l}`**, `head`
-  - **`socket.r` é o encaixe de arma do rig** → a pistola vai nele
+- **`socket.r` é o encaixe de arma do rig** — **não é mais usado** (a V2 monta a arma
+  no referencial da MÃO, derivado dos próprios ossos; ver abaixo)
   - **`wrist_ik` / `arm_target`** mostram que o rig foi montado para IK
   - Pose default **não é T-pose**: os braços já vêm numa pose natural de porte
   - bbox local ≈ **10,97 × 4,93 × 4,41** unidades → **escala não métrica** (calibrar por cfg)
   - **0 animações** (só o rig)
   - `head` em (0, +1,5, 0) e `root` em (0, −1, 0) → há um referencial de corpo no rig
+
+### Referencial da palma (medido do rig, no load)
+
+O código deriva, por mão, do repouso do rig:
+`palma_frente` = punho → média das bases dos 4 dedos longos; `palma_normal` =
+`cross(frente, pinky−index)`, com o sinal escolhido para apontar ao centro do rig (a palma
+de uma mão em posição natural olha para o corpo); `palma_centro` = punho + 55% desse
+caminho. Medições do `arms.glb`:
+
+| mão | palma_frente | palma_normal | centro da palma |
+|---|---|---|---|
+| esquerda | (−0,71 −0,49 −0,50) | (−0,27 +0,85 −0,44) | 0,37 un. do rig do punho |
+| direita | (+0,71 −0,49 −0,50) | (+0,27 +0,85 −0,44) | 0,37 un. do rig do punho |
+
+(≈ 1,6 unidade GoldSrc = 4 cm do punho, já com `scale_arms`.) É esse ponto que a
+empunhadura da arma ancora, e é o que fez o encaixe parar de ser chute.
 
 ## Pistola — `Pistol_1.obj` (Quaternius, *Ultimate Guns Pack*)
 

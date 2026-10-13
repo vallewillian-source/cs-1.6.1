@@ -219,23 +219,42 @@ do cano). É tudo no cliente — o servidor não sabe que existe VR.
 - `VR_MOVE_PITCH_COMP=1` liga uma compensação para o caso de a arma apontada para o
   chão deixar o andar lento: com a mira na mão, quem escala o movimento é o pitch da
   **arma**, não o da cabeça. Padrão desligado (comportamento idêntico ao do jogo).
-- Ainda **não** tem: duas mãos no rifle, roll do pulso na arma,
-  recarga ou pino de granada por gesto, holster, haptics nem recuo visual. O recuo do
-  jogo continua desviando o tiro, mas **não** empurra a câmera (bom contra enjoo — o
-  retorno de recuo terá de vir da arma, na próxima etapa).
 
 ### Mãos e arma de verdade (viewmodel próprio) — só na classe "pistol"
 
 Na classe **pistol** (usp, glock18, p228, deagle, elite, fiveseven) o jogo **para de
-desenhar o viewmodel de 1999** e o mod desenha o dele: **braços com skin** (WRAD ARMS,
-CC0) e uma **pistola** (Quaternius, CC0), presa no osso `socket.r` do próprio rig. Os
-dois braços fazem **IK de dois ossos** até onde estão seus controles — a mão esquerda
-fecha a empunhadura a duas mãos — e o mundo **oclui** os braços (profundidade real).
-Ao atirar há um **recuo procedural** (kick + giro), disparado na borda do gatilho.
+desenhar o viewmodel de 1999** e o mod desenha o dele: **braços com skin** (WRAD ARMS, CC0)
+e uma **pistola** (Quaternius, CC0) que segue as mãos, com os dois braços fazendo **IK de
+dois ossos** até os controles e o mundo **ocluindo** tudo (profundidade real). As outras
+classes seguem com o viewmodel do jogo, e **no modo flat nada muda**.
 
-A calibração vive em `game/mods/vr_hands.cfg` (salvar já aplica, sem reiniciar): escala,
-orientação da arma no soco, giro do conjunto. As demais classes de arma seguem com o
-viewmodel do jogo, e **no modo flat nada muda**.
+- **A mão fecha** com o grip do controle (os 30 ossos de dedo do rig flexionam na direção
+  da palma; segurando a arma o punho fecha no cabo).
+- **Coldre na barriga**: leve a pistola até perto do corpo e solte o grip — ela fica
+  guardada. Soltar longe da barriga faz ela **cair no chão** (gravidade de verdade) e ficar
+  lá deitada. Com o grip apertado perto dela, **qualquer uma das mãos** a pega de volta.
+- **Duas mãos**: com os dois grips apertados e a mão de apoio na arma, o cano passa a ser a
+  direção das duas mãos e a mão de apoio se ajusta à arma. Largar só uma das mãos **não**
+  derruba a pistola.
+- **A mira vem do cano** (a arma na mão é o que vai ao servidor, com o encaixe calibrado).
+  `VR_AIM_FROM_WEAPON=0` volta a mirar pela mão/cabeça (`VR_AIM_SOURCE`).
+- **Fora da mão o gatilho não atira** — é o que dá sentido a guardar/soltar. Vale só para a
+  classe `pistol`; com o rifle equipado nada muda. `enforce_armed 0` no cfg desliga.
+- **Recuo visual** no referencial da arma (para trás no cano + boca para cima); o recuo que
+  desvia o tiro continua sendo o do jogo.
+- O encaixe agora é **resolvido**, não calibrado no chute: eixos por asset, empunhadura
+  ancorada no centro da palma e **escala pelo comprimento real em cm** (`weapon_length_cm`).
+  O que sobra no `game/mods/vr_hands.cfg` (salvar já aplica, sem reiniciar) é gosto:
+  `weapon_off`, `weapon_euler`, posição do coldre, raios de pega, `curl_fist`.
+- `VR_BODY_YAW_LAG=0.25` faz o **tronco** (e o coldre) atrasar em relação à cabeça, para
+  olhar para o lado não girar o coldre junto.
+- **Diagnóstico sem headset:** `VR_HANDS_SHEET=fit|weapon|curl|states|walk` desenha uma
+  **folha de contato** (grade de vistas do mesmo caminho de desenho) que sai no
+  `VR_PANEL_DUMP`; `tools/ppm2png.py` converte para PNG. O modo `walk` roda a máquina de
+  estados passo a passo e o log diz o estado de cada passo. Receita completa em
+  **[docs/HANDS.md](docs/HANDS.md)**, junto com as chaves do cfg e o que já foi provado.
+- Ainda **não** tem: recarga ou pino de granada por gesto, roll do pulso na arma (torção de
+  antebraço), haptics, som, colisão da arma largada nem as demais classes de arma.
 
 Arquitetura, chaves do cfg, diagnóstico sem headset e o que já foi provado estão em
 **[docs/HANDS.md](docs/HANDS.md)**; os assets e as licenças, em [CREDITS.md](CREDITS.md).

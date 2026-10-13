@@ -203,9 +203,20 @@ Regras de aplicação (em `IN_ModAppendMove`):
   `common/const.h`: `MOD_BTN_ATTACK→IN_ATTACK`, `ATTACK2→IN_ATTACK2`,
   `JUMP→IN_JUMP`, `USE→IN_USE`, `RELOAD→IN_RELOAD`, `CROUCH→IN_DUCK`,
   `SCORE→IN_SCORE`. `MOD_BTN_MENU` não tem bit equivalente — quem trata é o Mod.
+- O gate do gatilho é do Mod: com a arma fora da mão (coldre/chão) o `MOD_BTN_ATTACK`
+  **não é marcado** — é assim que "soltar a arma" tem consequência sem a ABI ter canal
+  de inventário. Ver `docs/HANDS.md`.
+
+### Grip por mão: ações do Mod, não da ABI (2026-10-13)
+O squeeze estava ligado a **uma** ação com os dois `squeeze/value` (`left` **e** `right`) e
+`countSubactionPaths = 0`: o runtime devolvia um valor só, misturado, e era impossível saber
+*qual* mão apertou — sem isso não há pegar/soltar por mão nem grip de duas mãos. Hoje são
+**duas ações** (`grip_left`, `grip_right`, `FLOAT`, com `subactionPath` da sua mão, via
+`vr_make_action_sub`), e o `MOD_BTN_WALK` continua saindo do **maior** dos dois, como antes.
+É o mesmo padrão já usado nas ações de pose (`aim_left`/`aim_right`). Os caminhos das mãos
+passaram a ser resolvidos **antes** da criação das ações, porque agora elas precisam deles.
 
 ### Arma na mão: `Mod_ViewModel` (v6, `MOD_CAP_DISPLAY`)
-
 Até a v5 o viewmodel era intocável: o client DLL escrevia origem e ângulos em
 `clgame.viewent` (a **orientação** vem do `V_CalcGunAngle`, derivada da view; a
 **origem** é o olho do player, com bob/smoothing) e o ref só desenhava — não havia
@@ -393,7 +404,7 @@ caminho do monitor.
 
 | Mod | Capabilities | Status |
 |-----|--------------|--------|
-| `vr` (OpenXR, WiVRn/Quest 3) | display + hud | **em construção** — estéreo da Fase 2 feita e conferido (frustum assimétrico por olho + IPD real do runtime + fov/pose declarados iguais aos renderizados, 2026-10-12); painel de debug da tela 2D (`Mod_Overlay2D`); input nas Fase 3, HUD no headset na Fase 4 |
+| `vr` (OpenXR, WiVRn/Quest 3) | display + hud + input + keys | **em construção** — estéreo por olho (frustum assimétrico + IPD do runtime), painel de debug (`Mod_Overlay2D`), menus no headset (`Mod_Hud`), input e arma na mão (Fase 6), e o **viewmodel próprio** (braços+arma com coldre, dedos e duas mãos) na classe `pistol` — ver `docs/HANDS.md` |
 | `null` (template log-only) | nenhuma (só lifecycle + frame) | **feito (Fase 1)** — `mods/null/`, `game/mods/mod_null.so`; também é o teste de gating do engine |
 | *futuro:* arma 6DoF, HD pack, gameplay, acessibilidade | — | pós-MVP, sobre a mesma ABI |
 

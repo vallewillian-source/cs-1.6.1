@@ -271,13 +271,36 @@ Convenções:
 - [ ] 🟡 **6.6** Validação com headset, em dois checkpoints de propósito: **(a)** `VR_AIM_SOURCE=head` — a arma na mão com a mira ainda pelo olhar, que é onde se calibra o encaixe sozinho; **(b)** `VR_AIM_SOURCE=right` — **atirar numa parede e o furo aparecer onde a arma aponta**. *Pronto quando:* o furo acompanha a arma, girar (snap + físico) não mexe na arma em relação à mão, andar segue a cabeça, encostar na parede esconde a arma, e `head` restaura o comportamento da Fase 3.
 - [x] 🟢 **6.7a Viewmodel próprio (classe pistol)** — o jogo para de desenhar o viewmodel
   de 1999 e o mod desenha braços (WRAD ARMS, CC0) + pistola (Quaternius, CC0), com skin
-  na CPU, **IK de dois ossos** nos dois braços até os controles, arma no osso `socket.r`
-  e recuo procedural no gatilho. Oclusão pelo mundo vem de graça (o FBO do olho já tinha
-  profundidade). Só a classe `pistol`; flat intocado. Doc: `docs/HANDS.md`; assets e
-  licenças: `CREDITS.md` + `mods/vr/assets/SOURCES.md`. Verificado sem headset por dump
-  (`VR_HANDS_TEST=1` + `VR_PANEL_DUMP`): carga, skin, projeção e a IK com poses sintéticas.
-  *Falta calibrar com o headset* (escala fina e orientação da arma no soco, no `vr_hands.cfg`).
-- [ ] 🟢 **6.7b Dívida registrada (fora desta etapa)**: duas mãos no rifle, roll do pulso na arma, recarga/pino por gesto, holster, buy menu no VR, haptics, animação de recarga e demais classes de arma. O recuo (`punchangle`) continua desviando o tiro e **não** empurra a câmera — bom contra enjoo, mas tira o retorno visual, que terá de vir da arma.
+  na CPU e **IK de dois ossos** nos dois braços até os controles. Oclusão pelo mundo vem de
+  graça (o FBO do olho já tinha profundidade). Só a classe `pistol`; flat intocado. Doc:
+  `docs/HANDS.md`; assets e licenças: `CREDITS.md` + `mods/vr/assets/SOURCES.md`.
+- [x] 🟢 **6.7b Sistema de armas de VR (V2 do viewmodel próprio, 13/10)** — o que a 6.7a
+  deixou tosco (arma só na mão direita, de lado/para trás, 4,2× maior, sem dedos) virou um
+  sistema no padrão de jogo de VR moderno:
+  - **encaixe RESOLVIDO**: eixos por asset no cfg, referencial da MÃO derivado do rig,
+    empunhadura ancorada no centro da palma (medido) e escala pelo **comprimento real em cm**
+    — a pistola saiu de ~32 para **7,48 un = 19,0 cm**, com o cano a **0,0°** da frente da mão
+    e a empunhadura a **0,00 un** da palma;
+  - **dedos que fecham**: eixo de flexão derivado do repouso (`cross(Y, direção-da-palma)`),
+    30 ossos, pesos por dedo e punho fechado no cabo ao segurar;
+  - **coldre na barriga**, **saque por qualquer mão**, **largar no chão** (gravidade real, o
+    chão é o do próprio jogador), **pegar do chão** e **duas mãos** (o cano vai da mão de
+    apoio à de trás e o IK da mão de apoio mira a arma); soltar uma das mãos não derruba;
+  - **integração**: `MOD_BTN_ATTACK` gateado (`enforce_armed`), **mira pelo cano**
+    (`VR_AIM_FROM_WEAPON`, ligado), recuo visual no referencial da arma, yaw de tronco
+    amortecido opcional (`VR_BODY_YAW_LAG`) para o coldre não girar com a cabeça, e grip
+    **por mão** com `subactionPath` (duas ações XR, no lugar de uma misturada);
+  - **ferramenta de aceite**: folhas de contato (`VR_HANDS_SHEET=fit|weapon|curl|states|walk`)
+    desenhadas no MESMO caminho de produção, com vistas relativas ao corpo, conversor
+    `tools/ppm2png.py` e relatório numérico no log. As folhas (e o relatório) provaram o
+    encaixe e o roteiro `walk` provou **8/8** transições da máquina de estados sem headset.
+  - Doc: `docs/HANDS.md` (inclui as 9 notas de bug e o que falta no headset).
+  - *Falta o headset* (seu lado): as 7 verificações listadas em `docs/HANDS.md`.
+- [ ] 🟢 **6.7c Dívida registrada (fora desta etapa)**: **recarga/pino de granada por gesto**,
+  roll do pulso na arma (torção de antebraço), haptics, som, buy menu no VR, colisão da arma
+  largada e as **demais classes de arma** (rifle/SMG etc., que seguem no viewmodel do jogo).
+  O recuo (`punchangle`) continua desviando o tiro e **não** empurra a câmera — bom contra
+  enjoo, mas tira o retorno visual, que agora vem da arma.
 - [x] 🟡 **6.8** Ajuste fino do IPD pelo teclado (sintoma: "perto é difícil de fundir, longe parece certo" — clássico de separação entre as câmeras grande demais, porque a disparidade do que está longe é minúscula). ABI **v7**: `Mod_Key` + `MOD_CAP_KEYS` — o Mod vê a tecla **antes de todo handler do engine** e pode **consumi-la**, o que é o que permite uma UI de calibração sem a tecla vazar para o jogo. No `mod_vr`: F9/Home/End liga o modo; `-`/`=` = ±1,0 mm, `,`/`.` = ±0,1 mm, `0` zera; o ajuste é um **delta** sobre a base (runtime ou `VR_IPD`), aplicado **escalando** o vetor medido entre os olhos (preserva a direção, inclusive o cant); o número aparece **escrito nos dois olhos** (disparidade zero = lê-se dentro do headset), no painel 2D (`IPD 74.6 mm = base 68.3 (runtime) +6.3 | posicao +63`) e no log, e o delta persiste em `game/mods/vr_ipd.cfg`. *Pronto quando:* o ajuste muda a imagem de forma monotônica, o valor sobrevive ao restart e `0` volta à base. — implementado e validado sem headset (ABI v7 carrega; teclas injetadas na janela chegaram ao hook, o log registrou cada passo e o `.cfg` foi gravado).
   - **Resultado do dono no headset (12/10):** o melhor ficou **no piso do ajuste** (o `-40,0 mm` de então → 27,3 mm), e ele quis descer mais. A trava era **minha** (`VR_IPD_DELTA_MAX_MM 40`), não física → o limite passou a ser o **IPD final** em **[0, 110] mm** (0 = as câmeras coincidem, imagem mono; abaixo de 0 os olhos trocam de lado e o cérebro não funde).
   - **Calibração final do dono (12/10, com a faixa nova):** ele desceu de 1 em 1 mm até o **piso** — o `mods/vr_ipd.cfg` fechou em **`-67,2 mm` = IPD final 0,0 mm (mono)**, e é ali que o par funde melhor ("quanto menos, melhor" até o fim da faixa). O padrão compilado passou a ser esse (`VR_IPD_DELTA_DEFAULT_MM -67.2`, sobrescrito por `VR_IPD_ADJUST` e depois pelo `.cfg`). Como o gosto foi até o fim da faixa, o que sobra para investigar **não encolhe junto com o IPD**: desalinhamento vertical/rotacional do par (o cant do Quest 3) e o near plane fixo do engine (4 u ≈ 10 cm, que o roomscale deixa alcançar).

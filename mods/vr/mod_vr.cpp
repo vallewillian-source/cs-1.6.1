@@ -902,8 +902,9 @@ static void pose_to_viewangles( const XrPosef &pose, float out[3] )
 // continuamente, ele acumula um offset de yaw aplicado igualmente no cmd e no
 // render — senão o corpo passaria a atirar para um lado e a olhar para o outro.
 static XrActionSet xr_actionset = XR_NULL_HANDLE;
-static XrAction xr_act_move, xr_act_turn, xr_act_fire, xr_act_altfire, xr_act_grip;
+static XrAction xr_act_move, xr_act_turn, xr_act_fire, xr_act_altfire;
 static XrAction xr_act_jump, xr_act_reload, xr_act_use, xr_act_score, xr_act_crouch, xr_act_menu, xr_act_haptic;
+static XrAction xr_act_grip[2];   // POR MAO: o grip decide quem segura a arma
 static XrAction xr_act_aim[2];
 static XrSpace  xr_aim_space[2] = { XR_NULL_HANDLE, XR_NULL_HANDLE };
 static XrPath   xr_path_hand[2] = { XR_NULL_PATH, XR_NULL_PATH };
@@ -936,6 +937,12 @@ static float vr_vignette_now;             // intensidade da vignette neste frame
 static bool  in_valid;
 static float in_move[2], in_turn[2];
 static float in_fire, in_altfire, in_squeeze;
+static float in_grip[2];    // squeeze por mao (0 = esquerda, 1 = direita)
+// yaw do TRONCO (o coldre fica nele): com VR_BODY_YAW_LAG > 0 ele atrasa em relacao
+// a cabeca, entao olhar para o lado nao gira o coldre junto. 0 = instantaneo.
+static float  vr_body_yaw;
+static double vr_body_yaw_t;
+static float  vr_body_yaw_lag;
 static bool  in_jump, in_reload, in_use, in_score, in_crouch_btn, in_menu;
 static bool  in_menu_prev;
 static bool  in_hand_ok[2];
@@ -947,6 +954,7 @@ static char  in_profile[2][128] = { "(?)", "(?)" };
 enum { VR_AIM_HEAD = 0, VR_AIM_LEFT = 1, VR_AIM_RIGHT = 2 };
 
 static int    vr_aim_source = VR_AIM_RIGHT; // VR_AIM_SOURCE (padrão: mão direita)
+static bool   vr_aim_from_weapon = true;    // VR_AIM_FROM_WEAPON=0 volta ao da mão
 static bool   vr_wpn_world_depth = true;    // VR_WEAPON_WORLD_DEPTH=0 desliga
 static bool   vr_move_pitch_comp;           // VR_MOVE_PITCH_COMP (padrão off)
 static XrPosef in_hand_pose[2];             // pose da mira (orientação inclusa)
@@ -1599,6 +1607,32 @@ static bool vr_make_action( XrAction *out, XrActionType type, const char *name, 
 	return true;
 }
 
+// Igual, mas LIGADA a uma mao (subaction path): o runtime devolve um estado POR
+// MAO, que e o que permite distinguir o grip esquerdo do direito. Sem isto os dois
+// squeezes caem no MESMO valor e nao da para pegar/soltar a arma com uma mao so.
+static bool vr_make_action_sub( XrAction *out, XrActionType type, const char *name,
+	const char *label, XrPath hand )
+{
+	XrActionCreateInfo ci {};   // {} (e nao { XR_TYPE_... }) zera o resto sem aviso
+	XrResult r;
+
+	ci.type = XR_TYPE_ACTION_CREATE_INFO;
+	ci.actionType = type;
+	ci.countSubactionPaths = 1;
+	ci.subactionPaths = &hand;
+	snprintf( ci.actionName, XR_MAX_ACTION_NAME_SIZE, "%s", name );
+	snprintf( ci.localizedActionName, XR_MAX_LOCALIZED_ACTION_NAME_SIZE, "%s", label );
+
+	r = xrCreateAction( xr_actionset, &ci, out );
+	if( XR_FAILED( r ))
+	{
+		vr_note( VR_SEV_ERROR, "xrCreateAction(%s): %d %s\n", name, ( int )r, vr_xr_result_str( ( int )r ));
+		return false;
+	}
+
+	return true;
+}
+
 struct VrBind
 {
 	XrAction    *action;
@@ -1670,11 +1704,20 @@ static bool vr_actions_init( void )
 
 	bool ok = true;
 
+	// os caminhos das maos sao precisos JAH na criacao das acoes (o grip e a mira
+	// sao por mao), entao eles saem daqui e nao do laco dos action spaces
+	for( int h = 0; h < 2; h++ )
+		xrStringToPath( xr_instance, h == 0 ? "/user/hand/left" : "/user/hand/right", &xr_path_hand[h] );
+
 	ok = vr_make_action( &xr_act_move,    XR_ACTION_TYPE_VECTOR2F_INPUT, "move",     "Mover" ) && ok;
 	ok = vr_make_action( &xr_act_turn,    XR_ACTION_TYPE_VECTOR2F_INPUT, "turn",     "Girar" ) && ok;
 	ok = vr_make_action( &xr_act_fire,    XR_ACTION_TYPE_FLOAT_INPUT,    "fire",     "Atirar" ) && ok;
 	ok = vr_make_action( &xr_act_altfire, XR_ACTION_TYPE_FLOAT_INPUT,    "altfire",  "Ataque secundario" ) && ok;
-	ok = vr_make_action( &xr_act_grip,    XR_ACTION_TYPE_FLOAT_INPUT,    "grip",     "Andar devagar" ) && ok;
+	// grip POR MAO: e o mesmo squeeze de sempre, mas com subaction path — e o que
+	// permite saber QUAL mao apertou (sem isso nao da para pegar/soltar a arma, nem
+	// exigir as duas maos). O MOD_BTN_WALK continua saindo do maior dos dois.
+	ok = vr_make_action_sub( &xr_act_grip[0], XR_ACTION_TYPE_FLOAT_INPUT, "grip_left",  "Grip esquerdo", xr_path_hand[0] ) && ok;
+	ok = vr_make_action_sub( &xr_act_grip[1], XR_ACTION_TYPE_FLOAT_INPUT, "grip_right", "Grip direito",  xr_path_hand[1] ) && ok;
 	ok = vr_make_action( &xr_act_jump,    XR_ACTION_TYPE_BOOLEAN_INPUT,  "jump",     "Pular" ) && ok;
 	ok = vr_make_action( &xr_act_reload,  XR_ACTION_TYPE_BOOLEAN_INPUT,  "reload",   "Recarregar" ) && ok;
 	ok = vr_make_action( &xr_act_use,     XR_ACTION_TYPE_BOOLEAN_INPUT,  "use",      "Usar" ) && ok;
@@ -1695,8 +1738,6 @@ static bool vr_actions_init( void )
 	{
 		XrActionSpaceCreateInfo sci { XR_TYPE_ACTION_SPACE_CREATE_INFO };
 
-		xrStringToPath( xr_instance, h == 0 ? "/user/hand/left" : "/user/hand/right", &xr_path_hand[h] );
-
 		sci.action = xr_act_aim[h];
 		sci.subactionPath = xr_path_hand[h];
 		sci.poseInActionSpace.orientation = { 0, 0, 0, 1 };
@@ -1711,8 +1752,8 @@ static bool vr_actions_init( void )
 		{ &xr_act_turn,    "/user/hand/right/input/thumbstick" },
 		{ &xr_act_fire,    "/user/hand/right/input/trigger/value" },
 		{ &xr_act_altfire, "/user/hand/left/input/trigger/value" },
-		{ &xr_act_grip,    "/user/hand/left/input/squeeze/value" },
-		{ &xr_act_grip,    "/user/hand/right/input/squeeze/value" },
+		{ &xr_act_grip[0], "/user/hand/left/input/squeeze/value" },
+		{ &xr_act_grip[1], "/user/hand/right/input/squeeze/value" },
 		{ &xr_act_jump,    "/user/hand/right/input/a/click" },
 		{ &xr_act_reload,  "/user/hand/right/input/b/click" },
 		{ &xr_act_use,     "/user/hand/left/input/x/click" },
@@ -1846,8 +1887,17 @@ static void vr_actions_sync( void )
 	if( XR_SUCCEEDED( xrGetActionStateFloat( xr_session, &gi, &fv )) && fv.isActive ) in_fire = fv.currentState;
 	gi.action = xr_act_altfire;
 	if( XR_SUCCEEDED( xrGetActionStateFloat( xr_session, &gi, &fv )) && fv.isActive ) in_altfire = fv.currentState;
-	gi.action = xr_act_grip;
-	if( XR_SUCCEEDED( xrGetActionStateFloat( xr_session, &gi, &fv )) && fv.isActive ) in_squeeze = fv.currentState;
+	// squeeze: POR MAO (cada acao tem o subaction path da sua mao). O in_squeeze
+	// segue sendo o maior dos dois, para o MOD_BTN_WALK nao mudar de comportamento.
+	in_grip[0] = in_grip[1] = 0.0f;
+	for( int h = 0; h < 2; h++ )
+	{
+		gi.action = xr_act_grip[h];
+		gi.subactionPath = xr_path_hand[h];
+		if( XR_SUCCEEDED( xrGetActionStateFloat( xr_session, &gi, &fv )) && fv.isActive )
+			in_grip[h] = fv.currentState;
+	}
+	in_squeeze = ( in_grip[0] > in_grip[1] ) ? in_grip[0] : in_grip[1];
 
 #define VR_BOOL( act, dst ) \
 	do { \
@@ -1921,6 +1971,25 @@ static void vr_actions_sync( void )
 // Callback da ABI (MOD_CAP_INPUT). Fora de uma sessão ativa devolve a amostra
 // zerada — é o que mantém o jogo jogável no plano/flat, com mouse e teclado
 // intactos, e o menu do jogo respondendo ao mouse.
+// ---------------- viewmodel proprio: estado consultado pelo input ----------------
+// O subsistema vive em vr_hands.cpp e nao depende da ABI do Mod. Estes sao os
+// fatos que o VR_Input (mira e gatilho) precisa ANTES de a pose ser resolvida:
+// o mod escreve aqui no VR_FramePre e le no VR_Input, no MESMO frame.
+static bool vr_hands_test;   // VR_HANDS_TEST=1: modo de teste sem headset
+static bool vr_hands_draw_ours;  // decisao do VR_ViewModel: o viewmodel e o nosso
+static const char *vr_hands_fake_model;  // VR_HANDS_FAKE_MODEL: nome injetado (sem headset)
+static bool  vr_hands_drew;              // ja desenhou nos olhos (log unico)
+
+// Corpo do jogador: ancora do coldre e do chao. Definidos depois (usam o que o
+// VR_Camera ja capturou).
+static void vr_hands_body_fill( vr_hands_body_t *b );
+static void vr_hands_frame( void );
+static void vr_hands_fill( vr_hands_hand_t out[2] );
+
+// Relato do frame do subsistema (o VR_Input consulta: mira e gatilho).
+static vr_hands_state_t vr_hands_state;
+static double vr_hands_t_prev;
+
 static void VR_Input( mod_input_sample_t *s )
 {
 	// zerada a cada frame: se a sessão cair, a vignette não fica presa
@@ -1929,14 +1998,24 @@ static void VR_Input( mod_input_sample_t *s )
 	if( !vr_active || !xr_views_ok || !in_valid )
 		return;
 
-	// ---- orientação: quem manda é a fonte da mira (VR_AIM_SOURCE) ----
-	// Com a mira na mão, o eixo da ARMA é o que vai ao servidor: a direção do
-	// tiro é v_angle + punchangle lá, então é isto que faz o tiro sair para onde
-	// a arma aponta. Se a pose da mão não estiver válida, cai na cabeça — nunca
-	// se fica sem mira (fail-safe).
+	// ---- orientação: quem manda é a ARMA na mão; sem ela, a fonte da mira ----
+	// Com o encaixe calibrado, a direção do CANO é a resposta certa: é o que faz o
+	// grip de duas mãos (e o saque com qualquer das mãos) concordar com o que se vê.
+	// VR_AIM_FROM_WEAPON=0 volta a mirar pela mão/cabeça (VR_AIM_SOURCE).
 	int aim_hand = ( vr_aim_source == VR_AIM_LEFT ) ? 0 : ( vr_aim_source == VR_AIM_RIGHT ? 1 : -1 );
+	const float *baim = vr_hands_state.aim;
+	bool gun_aim = vr_aim_from_weapon && vr_hands_draw_ours && vr_hands_state.armed
+		&& ( baim[0] != 0.0f || baim[1] != 0.0f || baim[2] != 0.0f );
 
-	if( aim_hand >= 0 && in_hand_ok[aim_hand] )
+	if( gun_aim )
+	{
+		// a direção já vem no espaço do MUNDO (o vr_hands_fill gira pelo snap turn),
+		// então aqui NÃO se soma o vr_yaw_offset de novo
+		s->viewangles_abs[0] = ( float )-rad2deg( asin( fmaxf( -1.0f, fminf( 1.0f, ( double )baim[2] ))));
+		s->viewangles_abs[1] = wrap180( ( float )rad2deg( atan2( ( double )baim[1], ( double )baim[0] )));
+		s->viewangles_abs[2] = 0.0f;
+	}
+	else if( aim_hand >= 0 && in_hand_ok[aim_hand] )
 	{
 		pose_to_viewangles( in_hand_pose[aim_hand], s->viewangles_abs );
 		s->viewangles_abs[1] = wrap180( s->viewangles_abs[1] + vr_yaw_offset );
@@ -2055,15 +2134,14 @@ static void VR_Input( mod_input_sample_t *s )
 	// da tela de compra.
 	const bool menu_takes_trigger = ( vr_menu_open && vr_menu );
 
-	if( !menu_takes_trigger && in_fire > vr_trigger_th ) st |= MOD_BTN_ATTACK;
-	// recuo visual do viewmodel próprio: dispara na BORDA do gatilho (não a cada
-	// frame, senão o kick ficaria "ligado" enquanto o gatilho estivesse puxado).
-	{
-		static bool fire_prev;
-		const bool fire_now = !menu_takes_trigger && in_fire > vr_trigger_th;
-		if( fire_now && !fire_prev ) vr_hands_trigger_recoil();
-		fire_prev = fire_now;
-	}
+	// A ARMA TEM DE ESTAR NA MÃO. Vale só para a classe que nós desenhamos (com o
+	// rifle equipado nada disso se aplica): guardar no coldre ou largar no chão
+	// passa a ter consequência — o gatilho não atira. enforce_armed 0 no cfg desliga.
+	const bool can_fire = !vr_hands_draw_ours || !vr_hands_enforce_armed() || vr_hands_state.armed;
+
+	if( !menu_takes_trigger && in_fire > vr_trigger_th && can_fire ) st |= MOD_BTN_ATTACK;
+	// (o recuo visual do viewmodel próprio saiu daqui: quem dispara o kick agora é
+	// o vr_hands, na borda do gatilho que ele mesmo lê — vr_hands_frame)
 	if( in_altfire > vr_trigger_th ) st |= MOD_BTN_ATTACK2;
 	if( in_squeeze > vr_squeeze_th ) st |= MOD_BTN_WALK;
 	if( in_jump ) st |= MOD_BTN_JUMP;
@@ -3549,9 +3627,7 @@ static void VR_Overlay2D( void )
 }// ---------------- hooks da ABI ----------------
 // ---------------- viewmodel proprio (bracos + arma) ----------------
 // O subsistema vive em vr_hands.cpp e nao depende da ABI: recebe o que o mod ja
-// sabe (camera por olho) e desenha. Aqui so ligamos/desligamos e damos o log.
-static bool vr_hands_test;   // VR_HANDS_TEST=1: modelo parado na frente da camera
-
+// sabe (poses das maos, corpo) e devolve o estado. Aqui so ligamos/desligamos.
 static void vr_hands_log_adapter( const char *msg )
 {
 	vr_note( VR_SEV_INFO, "%s", msg );
@@ -3619,6 +3695,11 @@ static int VR_Init( const mod_engine_api_t *e )
 	vr_roomscale_max = env_float( "VR_ROOMSCALE_MAX", 0.6f );
 	vr_vignette = env_float( "VR_COMFORT_VIGNETTE", 0.0f );
 
+	// yaw do tronco com atraso (o coldre fica no tronco, nao na cabeca). 0 = como era.
+	vr_body_yaw_lag = env_float( "VR_BODY_YAW_LAG", 0.0f );
+	if( vr_body_yaw_lag < 0.0f ) vr_body_yaw_lag = 0.0f;
+	if( vr_body_yaw_lag > 2.0f ) vr_body_yaw_lag = 2.0f;
+
 	if( vr_deadzone < 0.0f ) vr_deadzone = 0.0f;
 	if( vr_deadzone > 0.9f ) vr_deadzone = 0.9f;
 	if( vr_snap_angle < 0.0f ) vr_snap_angle = 0.0f;
@@ -3649,6 +3730,9 @@ static int VR_Init( const mod_engine_api_t *e )
 	vr_wpn_world_depth = !env_off( "VR_WEAPON_WORLD_DEPTH" );
 	vr_move_pitch_comp = env_on( "VR_MOVE_PITCH_COMP" );
 	vr_wpn_debug = env_on( "VR_WEAPON_DEBUG" );
+	// mira pelo CANO da arma (padrão ligado): VR_AIM_FROM_WEAPON=0 volta a mirar
+	// pela mão/cabeça, como antes
+	vr_aim_from_weapon = !env_off( "VR_AIM_FROM_WEAPON" );
 
 	// offset sintético de teste (diagnóstico sem headset; ver VR_ViewModel)
 	{
@@ -3724,7 +3808,25 @@ static int VR_Init( const mod_engine_api_t *e )
 	// viewmodel proprio: falha aqui NAO derruba o mod (sem os assets, o mod
 	// simplesmente segue com o viewmodel do jogo, como antes).
 	vr_hands_test = env_on( "VR_HANDS_TEST" );
+	vr_hands_fake_model = getenv( "VR_HANDS_FAKE_MODEL" );
 	vr_hands_init( vr_hands_log_adapter );
+	// folha de contato (diagnostico sem headset): VR_HANDS_SHEET=fit|weapon|curl|states
+	{
+		const char *sh = getenv( "VR_HANDS_SHEET" );
+
+		if( sh && *sh )
+		{
+			int m = VR_SHEET_FIT;
+
+			if     ( !strcmp( sh, "weapon" )) m = VR_SHEET_WEAPON;
+			else if( !strcmp( sh, "curl" ))   m = VR_SHEET_CURL;
+			else if( !strcmp( sh, "states" )) m = VR_SHEET_STATES;
+			else if( !strcmp( sh, "walk" ))   m = VR_SHEET_WALK;
+			vr_hands_set_sheet( m );
+			logf( "VR_HANDS_SHEET=%s (folha de contato ligada)\n", sh );
+			vr_hands_test = true;   // a folha so desenha no caminho sem headset
+		}
+	}
 
 	// GLX só na main thread (contexto atual); o resto do init roda fora —
 	// o xrCreateInstance do WiVRn bloqueia sem headset e congelaria o jogo
@@ -3887,6 +3989,11 @@ static void VR_FramePre( double time )
 			// input: xrSyncActions + leitura dos estados, com a pose e o
 			// predictedDisplayTime deste frame já em mãos
 			vr_actions_sync();
+
+			// viewmodel próprio: 1x por FRAME (não por olho) — resolve a pose dos
+			// braços, os dedos, o encaixe da arma e o ESTADO (mão/coldre/chão).
+			// Tem de ser aqui: é o que o VR_Input deste frame vai consultar.
+			vr_hands_frame();
 
 			double now = eng ? eng->DoubleTime() : 0.0;
 
@@ -4835,6 +4942,39 @@ static void VR_ViewModel( mod_viewmodel_t *vm )
 	// separa "o jogo não me deu arma" de "eu errei a posição da arma"
 	vr_wpn_diag( vm );
 
+	// Classe/nome do modelo atual — PRECISA rodar antes de qualquer `return`:
+	// é o que o gate do viewmodel próprio (abaixo) E o gate do desenho (no
+	// VR_AfterEyes) consultam. Quando isto ficava depois do `return` do hide, o
+	// nome nunca era atualizado para a pistola: o jogo escondia a arma dele e o
+	// nosso desenho não acontecia — "sem arma e sem braços". Só o primeiro olho
+	// escreve (senão o log sairia em dobro por frame).
+	const char *mname = vm->model_name[0] ? vm->model_name
+		: ( vr_hands_fake_model ? vr_hands_fake_model : "" );
+	if( vm->eye == 0 && mname[0] )
+	{
+		int cls = vr_wpn_class_id( mname );
+
+		if( cls != vr_wpn_class || strcmp( vr_wpn_model, mname ))
+		{
+			vr_wpn_class = cls;
+			snprintf( vr_wpn_model, sizeof( vr_wpn_model ), "%s", mname );
+			vr_note( VR_SEV_INFO, "arma: modelo %s (classe %s) | mira %s%s\n",
+				vr_wpn_model, vr_wpn_class_names[cls], vr_aim_source_name(),
+				vm->model_name[0] ? "" : " [nome injetado por VR_HANDS_FAKE_MODEL]" );
+		}
+	}
+
+	// Decisão ÚNICA sobre "o desenho é nosso?": o mesmo booleano esconde o
+	// viewmodel do jogo aqui e autoriza o desenho no VR_AfterEyes. Duas consultas
+	// separadas podiam discordar (foi o que causou o sumiço).
+	{
+		const bool before = vr_hands_draw_ours;
+		vr_hands_draw_ours = vr_hands_ready() && vr_hands_covers_model( mname );
+		if( vr_hands_draw_ours != before )
+			vr_note( VR_SEV_INFO, "maos: %s o viewmodel da classe coberta (%s)\n",
+				vr_hands_draw_ours ? "ASSUMINDO" : "devolvendo ao jogo", vr_wpn_model );
+	}
+
 	// Modo de teste SEM headset (VR_WEAPON_TEST="x y z"): põe a arma num offset
 	// fixo, em unidades GoldSrc, a partir do olho do player. Serve para conferir
 	// o caminho do engine (a origem é aplicada? o depth/oclusão funciona?) sem
@@ -4855,7 +4995,7 @@ static void VR_ViewModel( mod_viewmodel_t *vm )
 	// Viewmodel próprio: cobrindo esta arma, o JOGO não desenha a dele — quem
 	// desenha é o vr_hands (braços + arma, seguindo as mãos). Só com VR ativo:
 	// no modo flat o jogador continua vendo o viewmodel de sempre.
-	if( vr_hands_ready() && vr_hands_covers_model( vm->model_name ))
+	if( vr_hands_draw_ours )
 	{
 		vm->hide = 1;
 		vm->world_depth = 1;
@@ -4874,21 +5014,6 @@ static void VR_ViewModel( mod_viewmodel_t *vm )
 	// a origem que o client DLL escreveu (o olho) — guardada só para o
 	// diagnóstico: é o que o jogo faria sem esta sobrescrita
 	float vm_in_origin[3] = { vm->origin[0], vm->origin[1], vm->origin[2] };
-
-	// classe do modelo atual: alimenta o painel e o encaixe por classe. Só o
-	// primeiro olho escreve (senão o log sairia em dobro por frame).
-	if( vm->eye == 0 && vm->model_name[0] )
-	{
-		int cls = vr_wpn_class_id( vm->model_name );
-
-		if( cls != vr_wpn_class || strcmp( vr_wpn_model, vm->model_name ))
-		{
-			vr_wpn_class = cls;
-			snprintf( vr_wpn_model, sizeof( vr_wpn_model ), "%s", vm->model_name );
-			vr_note( VR_SEV_INFO, "arma: modelo %s (classe %s) | mira %s\n",
-				vr_wpn_model, vr_wpn_class_names[cls], vr_aim_source_name());
-		}
-	}
 
 	float off[3];
 
@@ -4984,6 +5109,104 @@ static void vr_hands_fill( vr_hands_hand_t out[2] )
 	}
 }
 
+// Corpo do jogador para o subsistema: posição (olho central + roomscale), eixos
+// do tronco e o plano do chão. Sem sessão (modo de teste) o corpo sai da câmera
+// que o VR_Camera capturou — é assim que a folha de contato mostra coldre e chão
+// sem headset.
+static void vr_hands_body_fill( vr_hands_body_t *b )
+{
+	memset( b, 0, sizeof( *b ));
+
+	if( vr_hands_test && !vr_active && vr_eye_cam[0].ok )
+	{
+		memcpy( b->pos, vr_eye_cam[0].origin, sizeof( b->pos ));
+		float ang[3] = { 0.0f, vr_eye_cam[0].angles[1], 0.0f };
+		vr_angles_basis( ang, b->fwd, b->rgt, b->up );
+	}
+	else
+	{
+		float off[3];
+
+		vr_roomscale_offset( off );
+		for( int i = 0; i < 3; i++ )
+			b->pos[i] = ( vr_menu_eye_base_ok ? vr_menu_eye_base[i] : 0.0f ) + off[i];
+
+		// yaw do tronco: segue a cabeca, com atraso opcional (VR_BODY_YAW_LAG em
+		// segundos; 0 = instantaneo, igual ao comportamento de antes)
+		{
+			const double now = eng ? eng->DoubleTime() : 0.0;
+			const float alvo = wrap180( vr_head_raw[1] + vr_yaw_offset );
+
+			if( vr_body_yaw_lag > 0.01f && vr_body_yaw_t > 0.0 && now > vr_body_yaw_t )
+			{
+				float k = ( float )(( now - vr_body_yaw_t ) / vr_body_yaw_lag );
+
+				if( k > 1.0f ) k = 1.0f;
+				vr_body_yaw = wrap180( vr_body_yaw + wrap180( alvo - vr_body_yaw ) * k );
+			}
+			else vr_body_yaw = alvo;
+
+			vr_body_yaw_t = now;
+		}
+		float ang[3] = { 0.0f, vr_body_yaw, 0.0f };
+		vr_angles_basis( ang, b->fwd, b->rgt, b->up );
+	}
+
+	// o plano do chão do JOGO: a ABI não dá raycast, então o chão da arma largada
+	// é o chão do próprio jogador (altura dos olhos em pé/agachado, como o engine)
+	b->eye_height = vr_duck_phys ? 12.0f : 28.0f;
+	b->floor_z = b->pos[2] - b->eye_height;
+}
+
+// 1x por frame, logo depois do vr_actions_sync (as poses já são deste frame).
+static void vr_hands_frame( void )
+{
+	static double done_t = -1.0;
+	const double now = eng ? eng->DoubleTime() : 0.0;
+
+	if( !vr_hands_ready()) return;
+	// o modo de teste chama isto do VR_AfterEyes (não há sessão nem FramePre de
+	// VR): este guarda evita resolver o MESMO frame duas vezes
+	if( now == done_t ) return;
+	// sem sessão só há trabalho a fazer no modo de diagnóstico
+	if( ( !vr_active || !xr_views_ok || !in_valid ) && !vr_hands_test )
+		return;
+	done_t = now;
+
+	vr_hands_body_t b;
+	vr_hands_in_t in;
+
+	vr_hands_body_fill( &b );
+
+	memset( &in, 0, sizeof( in ));
+	// grip: por enquanto o squeeze MISTURADO vale para as duas mãos — o grip por
+	// mão (ações separadas por subaction path) é a Fase 3
+	in.grip[0] = in_grip[0];
+	in.grip[1] = in_grip[1];
+	in.fire = ( in_fire > vr_trigger_th ) && !( vr_menu_open && vr_menu );
+
+	in.dt = ( vr_hands_t_prev > 0.0 && now > vr_hands_t_prev && ( now - vr_hands_t_prev ) < 0.5 )
+		? ( float )( now - vr_hands_t_prev ) : 0.016f;
+	vr_hands_t_prev = now;
+
+	// o recuo visual só vale com a arma na mão (mesma regra do gatilho no VR_Input)
+	{
+		const bool can_fire = !vr_hands_draw_ours || !vr_hands_enforce_armed() || vr_hands_state.armed;
+
+		if( !can_fire ) in.fire = false;
+	}
+
+	vr_hands_hand_t hands[2];
+
+	if( vr_active )
+	{
+		vr_hands_fill( hands );
+		vr_hands_update( &b, &in, hands, &vr_hands_state );
+	}
+	else
+		vr_hands_update( &b, &in, NULL, &vr_hands_state ); // poses sintéticas
+}
+
 static void VR_AfterEyes( void )
 {
 	if( vr_active && xr_frame_began )
@@ -5038,10 +5261,10 @@ static void VR_AfterEyes( void )
 		// Viewmodel próprio na VR: braços+arma seguindo as mãos, nos DOIS olhos.
 		// Entra quando cobrimos a arma em uso (o viewmodel do jogo já foi
 		// escondido no VR_ViewModel).
-		if( vr_hands_ready() && vr_hands_covers_model( vr_wpn_model ))
+		if( vr_hands_draw_ours )
 		{
-			vr_hands_hand_t hands[2];
-			vr_hands_fill( hands );
+			// a pose já foi resolvida no vr_hands_frame (1x por frame): aqui só se
+			// desenha, trocando o alvo por olho
 			for( int e = 0; e < 2; e++ )
 			{
 				if( xr_eye[e].fbos[0] == 0 || xr_eye[e].cur < 0 || !vr_eye_cam[e].ok )
@@ -5053,11 +5276,16 @@ static void VR_AfterEyes( void )
 
 				vr_hands_cam_t hc;
 				vr_hands_cam( &hc, vr_eye_cam[e] );
-				vr_hands_draw( &hc, hands );
+				vr_hands_draw( &hc );
 
 				pglBindFramebuffer( GL_FRAMEBUFFER, ( GLuint )prev );
 			}
 			vr_gl_check( "viewmodel proprio" );
+			if( !vr_hands_drew )
+			{
+				vr_hands_drew = true;
+				vr_note( VR_SEV_OK, "maos: desenhando o viewmodel proprio nos dois olhos (%s)\n", vr_wpn_model );
+			}
 		}
 		else if( vr_hands_test && vr_hands_ready() )
 		{
@@ -5072,7 +5300,7 @@ static void VR_AfterEyes( void )
 
 				vr_hands_cam_t hc;
 				vr_hands_cam( &hc, vr_eye_cam[e] );
-				vr_hands_draw( &hc, NULL ); // poses sintéticas (diagnóstico)
+				vr_hands_draw( &hc );   // poses sintéticas (diagnóstico)
 
 				pglBindFramebuffer( GL_FRAMEBUFFER, ( GLuint )prev );
 			}
@@ -5104,13 +5332,16 @@ static void VR_AfterEyes( void )
 		pglBindFramebuffer( GL_READ_FRAMEBUFFER, 0 );
 		( void )fbo;
 
-		// diagnóstico sem headset: o MESMO modelo, agora na janela (FBO 0), por
-		// cima do mundo e antes do HUD 2D — é o que o dump do painel captura.
+		// diagnóstico sem headset, na janela (FBO 0), antes do HUD 2D — é o que o
+		// dump do painel captura. Com a folha de contato ligada (VR_HANDS_SHEET) é
+		// ELA que sai no dump: a grade de vistas do mesmo modelo/encaixe.
 		if( vr_hands_test && vr_hands_ready() && vr_eye_cam[0].ok )
 		{
 			vr_hands_cam_t hc;
 			vr_hands_cam( &hc, vr_eye_cam[0] );
-			vr_hands_draw( &hc, NULL ); // poses sintéticas: prova a IK sem headset
+			vr_hands_frame();        // sem sessão o frame é resolvido aqui
+			vr_hands_sheet( &hc );   // só desenha se VR_HANDS_SHEET ligou a folha
+			vr_hands_draw( &hc );    // poses sintéticas: prova a IK sem headset
 		}
 	}
 }
