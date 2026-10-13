@@ -123,11 +123,19 @@ Lançamento: item **"Counter-Strike 1.6 VR"** no menu do GNOME (chama
 `scripts/run-cs-vr.sh`) — ou direto no terminal:
 
 ```bash
-./scripts/run-cs-vr.sh                          # menu em VR (ou flat, se headset off)
+./scripts/run-cs-vr.sh                          # sobe o servidor de bots (4v4 de_dust2) e entra em VR
+CS_BOTS=0 ./scripts/run-cs-vr.sh                # sem bots: menu em VR (ou flat, se headset off)
 ./scripts/run-cs-vr.sh +map de_dust2            # direto num mapa (o menu não aparece no HMD)
-./scripts/run-cs-vr.sh +connect 127.0.0.1:27015 # direto no dedicado
+./scripts/run-cs-vr.sh +connect 1.2.3.4:27015   # respeita o seu +connect (não sobe servidor local)
 VR_DEBUG=1 VR_DEBUG_CLEAR=1 ./scripts/run-cs-vr.sh   # debug + cores por olho
 ```
+
+- **Bots automáticos:** por padrão o launcher sobe o servidor dedicado com os
+  bots e o "cérebro" Jev ([docs/BOTBRAIN.md](docs/BOTBRAIN.md)), espera a porta
+  abrir, entra nele e derruba tudo quando você sai. Se já houver um servidor
+  rodando na porta, ele apenas conecta (sem subir nem derrubar nada); e se você
+  passar um `+connect` próprio, ele não sobe servidor local. `CS_BOTS=0` desliga
+  a novidade e volta ao comportamento antigo. Porta/config: `CS_BOT_PORT`.
 
 - Requer o WiVRn (RPM já instalado) com o dashboard/server rodando e o headset
   conectado. Sem headset: o mod detecta e o jogo roda **flat** (o init do OpenXR
@@ -211,10 +219,26 @@ do cano). É tudo no cliente — o servidor não sabe que existe VR.
 - `VR_MOVE_PITCH_COMP=1` liga uma compensação para o caso de a arma apontada para o
   chão deixar o andar lento: com a mira na mão, quem escala o movimento é o pitch da
   **arma**, não o da cabeça. Padrão desligado (comportamento idêntico ao do jogo).
-- Ainda **não** tem: duas mãos no rifle, mãos/braços visíveis, roll do pulso na arma,
+- Ainda **não** tem: duas mãos no rifle, roll do pulso na arma,
   recarga ou pino de granada por gesto, holster, haptics nem recuo visual. O recuo do
   jogo continua desviando o tiro, mas **não** empurra a câmera (bom contra enjoo — o
   retorno de recuo terá de vir da arma, na próxima etapa).
+
+### Mãos e arma de verdade (viewmodel próprio) — só na classe "pistol"
+
+Na classe **pistol** (usp, glock18, p228, deagle, elite, fiveseven) o jogo **para de
+desenhar o viewmodel de 1999** e o mod desenha o dele: **braços com skin** (WRAD ARMS,
+CC0) e uma **pistola** (Quaternius, CC0), presa no osso `socket.r` do próprio rig. Os
+dois braços fazem **IK de dois ossos** até onde estão seus controles — a mão esquerda
+fecha a empunhadura a duas mãos — e o mundo **oclui** os braços (profundidade real).
+Ao atirar há um **recuo procedural** (kick + giro), disparado na borda do gatilho.
+
+A calibração vive em `game/mods/vr_hands.cfg` (salvar já aplica, sem reiniciar): escala,
+orientação da arma no soco, giro do conjunto. As demais classes de arma seguem com o
+viewmodel do jogo, e **no modo flat nada muda**.
+
+Arquitetura, chaves do cfg, diagnóstico sem headset e o que já foi provado estão em
+**[docs/HANDS.md](docs/HANDS.md)**; os assets e as licenças, em [CREDITS.md](CREDITS.md).
 
 - **Desempenho:** o relógio do VR é o do headset (`xrWaitFrame`), nunca o do monitor — por
   isso o launcher força `+gl_vsync 0` **como comando de console** (a forma `-gl_vsync 0`

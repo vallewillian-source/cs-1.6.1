@@ -66,6 +66,11 @@ scripts/run-botbrain.sh         # sidecar + servidor (dust2)
 
 ou separadamente: `tools/botbrain/run.sh` contra um servidor já no ar.
 
+**No VR não precisa de nada disso:** `scripts/run-cs-vr.sh` sobe o servidor de
+bots sozinho, espera a porta abrir, entra na partida em VR e derruba tudo na
+saída (`CS_BOTS=0` desliga; `CS_BOT_PORT` muda a porta; se já houver servidor na
+porta ele só conecta, e um `+connect` seu faz ele nem subir servidor local).
+
 Credenciais: `~/Workspace/jev-ultrafast/.env` (`TYPESAFE_API_KEY`,
 `TYPESAFE_MODEL`). Nada é copiado nem modificado no clone do jev.
 

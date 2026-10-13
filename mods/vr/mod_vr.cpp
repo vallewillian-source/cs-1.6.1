@@ -155,6 +155,7 @@ Uso:   scripts/run-cs-vr.sh   (seta XR_RUNTIME_JSON do WiVRn etc.)
 
 #include "mod_api.h"
 #include "vr_font.h" // fonte bitmap do painel (gerada por gen_font.py)
+#include "vr_hands.h" // viewmodel proprio (bracos + arma) — subsistema a parte
 
 // GL 1.x / GLX 1.2: typedefs PFN das funções de core não existem em
 // gl.h/glext.h/glxext.h (só cobrem 1.2+/extensões) — declarar na mão:
@@ -2055,6 +2056,14 @@ static void VR_Input( mod_input_sample_t *s )
 	const bool menu_takes_trigger = ( vr_menu_open && vr_menu );
 
 	if( !menu_takes_trigger && in_fire > vr_trigger_th ) st |= MOD_BTN_ATTACK;
+	// recuo visual do viewmodel próprio: dispara na BORDA do gatilho (não a cada
+	// frame, senão o kick ficaria "ligado" enquanto o gatilho estivesse puxado).
+	{
+		static bool fire_prev;
+		const bool fire_now = !menu_takes_trigger && in_fire > vr_trigger_th;
+		if( fire_now && !fire_prev ) vr_hands_trigger_recoil();
+		fire_prev = fire_now;
+	}
 	if( in_altfire > vr_trigger_th ) st |= MOD_BTN_ATTACK2;
 	if( in_squeeze > vr_squeeze_th ) st |= MOD_BTN_WALK;
 	if( in_jump ) st |= MOD_BTN_JUMP;
@@ -3372,6 +3381,13 @@ static void panel_draw( void )
 		}
 	}
 
+	{
+		char hb[160];
+		vr_hands_status( hb, sizeof( hb ));
+		panel_text( x, y, ( float )sc, hb, vr_hands_ready() ? COL_OK : COL_DIM, COLS );
+		y += chh;
+	}
+
 	panel_rect( x, y + chh * 0.5f, x + COLS * cw, y + chh * 0.5f + ( sc > 1 ? 2.0f : 1.0f ), COL_LINE );
 	y += chh;
 
@@ -3531,6 +3547,29 @@ static void VR_Overlay2D( void )
 			panel_dump( vp[2], vp[3] );
 	}
 }// ---------------- hooks da ABI ----------------
+// ---------------- viewmodel proprio (bracos + arma) ----------------
+// O subsistema vive em vr_hands.cpp e nao depende da ABI: recebe o que o mod ja
+// sabe (camera por olho) e desenha. Aqui so ligamos/desligamos e damos o log.
+static bool vr_hands_test;   // VR_HANDS_TEST=1: modelo parado na frente da camera
+
+static void vr_hands_log_adapter( const char *msg )
+{
+	vr_note( VR_SEV_INFO, "%s", msg );
+}
+
+// vr_eye_cam_t (do mod) -> vr_hands_cam_t (do subsistema): são tipos distintos
+// de propósito, para o subsistema não depender do mod.
+static void vr_hands_cam( vr_hands_cam_t *out, const vr_eye_cam_t &c )
+{
+	memcpy( out->origin, c.origin, sizeof( out->origin ));
+	memcpy( out->angles, c.angles, sizeof( out->angles ));
+	memcpy( out->fov,    c.fov,    sizeof( out->fov ));
+	out->w = c.w; out->h = c.h; out->ok = c.ok;
+}
+
+// Poses das mãos no mundo, para o subsistema — definida junto do VR_AfterEyes
+// (depende de vr_room_to_world/pose_basis_g, que ficam mais abaixo).
+
 static int VR_Init( const mod_engine_api_t *e )
 {
 	eng = e;
@@ -3682,6 +3721,11 @@ static int VR_Init( const mod_engine_api_t *e )
 		return 0; // recusa: sem GL não há nem painel
 	}
 
+	// viewmodel proprio: falha aqui NAO derruba o mod (sem os assets, o mod
+	// simplesmente segue com o viewmodel do jogo, como antes).
+	vr_hands_test = env_on( "VR_HANDS_TEST" );
+	vr_hands_init( vr_hands_log_adapter );
+
 	// GLX só na main thread (contexto atual); o resto do init roda fora —
 	// o xrCreateInstance do WiVRn bloqueia sem headset e congelaria o jogo
 	if( !capture_glx())
@@ -3806,6 +3850,7 @@ static void VR_FramePre( double time )
 
 	vr_msgs_refresh(); // instantâneo do log p/ o painel deste frame
 	vr_wpn_cfg_tick(); // encaixe da arma: relê mods/vr_weapon.cfg se ele mudou
+	vr_hands_tick();   // viewmodel próprio: relê mods/vr_hands.cfg se ele mudou
 	vr_ipd_cfg_tick(); // ajuste do IPD: relê mods/vr_ipd.cfg se ele mudou
 	vr_menu_cfg_tick(); // painel dos menus: relê mods/vr_menu.cfg se ele mudou
 
@@ -4586,6 +4631,30 @@ static void VR_Hud( mod_hud_t *h )
 
 static void VR_Camera( mod_view_t *view )
 {
+	// Modo de diagnóstico (VR_HANDS_TEST) SEM VR ativo: mesmo sem sessão, a
+	// câmera que o engine usou é o que permite desenhar o modelo na janela e
+	// conferir a projeção sem headset. Só registra e sai — não mexe no render.
+	if( vr_hands_test && !vr_active && view->eye == 0 )
+	{
+		vr_eye_cam_t &c = vr_eye_cam[0];
+		for( int i = 0; i < 3; i++ ) { c.origin[i] = view->vieworigin[i]; c.angles[i] = view->viewangles[i]; }
+		if( view->has_fov_asym ) for( int i = 0; i < 4; i++ ) c.fov[i] = view->fov_asym[i];
+		else
+		{
+			// Frustum simétrico a partir do fov_x/fov_y do engine (graus, total).
+			// ATENÇÃO à unidade: cam->fov[] é em RADIANOS (é o que a ABI entrega
+			// em fov_asym, e o proj_matrix aplica tan() em cima) — guardar a
+			// tangente aqui aplicaria o tan duas vezes e achataria o modelo.
+			const double hx = view->fov_x * M_PI / 360.0, hy = view->fov_y * M_PI / 360.0;
+			c.fov[0] = ( float )-hx; c.fov[1] = ( float )hx;
+			c.fov[2] = ( float ) hy; c.fov[3] = ( float )-hy;
+		}
+		c.w = view->viewport[2] ? view->viewport[2] : 1920;
+		c.h = view->viewport[3] ? view->viewport[3] : 1080;
+		c.ok = true;
+		return;
+	}
+
 	if( !vr_active || !xr_views_ok || view->eye < 0 || view->eye > 1 )
 		return;
 
@@ -4783,6 +4852,16 @@ static void VR_ViewModel( mod_viewmodel_t *vm )
 	if( !vr_active || !xr_views_ok || !in_valid )
 		return;
 
+	// Viewmodel próprio: cobrindo esta arma, o JOGO não desenha a dele — quem
+	// desenha é o vr_hands (braços + arma, seguindo as mãos). Só com VR ativo:
+	// no modo flat o jogador continua vendo o viewmodel de sempre.
+	if( vr_hands_ready() && vr_hands_covers_model( vm->model_name ))
+	{
+		vm->hide = 1;
+		vm->world_depth = 1;
+		return;
+	}
+
 	int h = ( vr_aim_source == VR_AIM_LEFT ) ? 0 : 1;
 
 	// com a mira na cabeça (Fase 3), a arma ainda vai para a mão: a principal
@@ -4883,6 +4962,28 @@ static void VR_ViewModel( mod_viewmodel_t *vm )
 	}
 }
 
+// Poses das mãos no mundo, para o subsistema — a MESMA conversão que o laser do
+// menu usa (espaço do quarto -> mundo, com a base GoldSrc da pose).
+static void vr_hands_fill( vr_hands_hand_t out[2] )
+{
+	for( int h = 0; h < 2; h++ )
+	{
+		out[h].ok = in_hand_ok[h];
+		if( !out[h].ok ) continue;
+
+		vr_room_to_world( in_hand_g[h], out[h].pos );
+
+		float fwd[3], rgt[3], up[3];
+		pose_basis_g( in_hand_pose[h], fwd, rgt, up );
+		vr_rotate_yaw_offset( fwd );
+		vr_rotate_yaw_offset( rgt );
+		vr_rotate_yaw_offset( up );
+		memcpy( out[h].fwd, fwd, sizeof( fwd ));
+		memcpy( out[h].rgt, rgt, sizeof( rgt ));
+		memcpy( out[h].up,  up,  sizeof( up ));
+	}
+}
+
 static void VR_AfterEyes( void )
 {
 	if( vr_active && xr_frame_began )
@@ -4929,6 +5030,55 @@ static void VR_AfterEyes( void )
 
 		vr_gl_check( "apos render dos olhos" );
 
+		// viewmodel próprio — Fase 1: só o modo de diagnóstico (VR_HANDS_TEST).
+		// Desenha o modelo parado na frente da câmera NOS DOIS olhos, com
+		// profundidade real: o mundo já está no depth buffer, então ele oclui
+		// os braços. Este é o teste que prova carga+skin+textura+projeção sem
+		// headset (o dump do espelho mostra o resultado).
+		// Viewmodel próprio na VR: braços+arma seguindo as mãos, nos DOIS olhos.
+		// Entra quando cobrimos a arma em uso (o viewmodel do jogo já foi
+		// escondido no VR_ViewModel).
+		if( vr_hands_ready() && vr_hands_covers_model( vr_wpn_model ))
+		{
+			vr_hands_hand_t hands[2];
+			vr_hands_fill( hands );
+			for( int e = 0; e < 2; e++ )
+			{
+				if( xr_eye[e].fbos[0] == 0 || xr_eye[e].cur < 0 || !vr_eye_cam[e].ok )
+					continue;
+
+				GLint prev = 0;
+				pglGetIntegerv( GL_DRAW_FRAMEBUFFER_BINDING, &prev );
+				pglBindFramebuffer( GL_FRAMEBUFFER, xr_eye[e].fbos[xr_eye[e].cur] );
+
+				vr_hands_cam_t hc;
+				vr_hands_cam( &hc, vr_eye_cam[e] );
+				vr_hands_draw( &hc, hands );
+
+				pglBindFramebuffer( GL_FRAMEBUFFER, ( GLuint )prev );
+			}
+			vr_gl_check( "viewmodel proprio" );
+		}
+		else if( vr_hands_test && vr_hands_ready() )
+		{
+			for( int e = 0; e < 2; e++ )
+			{
+				if( xr_eye[e].fbos[0] == 0 || xr_eye[e].cur < 0 || !vr_eye_cam[e].ok )
+					continue;
+
+				GLint prev = 0;
+				pglGetIntegerv( GL_DRAW_FRAMEBUFFER_BINDING, &prev );
+				pglBindFramebuffer( GL_FRAMEBUFFER, xr_eye[e].fbos[xr_eye[e].cur] );
+
+				vr_hands_cam_t hc;
+				vr_hands_cam( &hc, vr_eye_cam[e] );
+				vr_hands_draw( &hc, NULL ); // poses sintéticas (diagnóstico)
+
+				pglBindFramebuffer( GL_FRAMEBUFFER, ( GLuint )prev );
+			}
+			vr_gl_check( "viewmodel proprio (teste)" );
+		}
+
 		// menus no VR: painel + laser por cima do mundo dos DOIS olhos e antes do
 		// espelho (o monitor também mostra o painel — dá para testar sem tirar o
 		// headset). Depois deste ponto o Mod desenhou, então o engine zera o
@@ -4953,6 +5103,15 @@ static void VR_AfterEyes( void )
 		pglBindFramebuffer( GL_DRAW_FRAMEBUFFER, 0 );
 		pglBindFramebuffer( GL_READ_FRAMEBUFFER, 0 );
 		( void )fbo;
+
+		// diagnóstico sem headset: o MESMO modelo, agora na janela (FBO 0), por
+		// cima do mundo e antes do HUD 2D — é o que o dump do painel captura.
+		if( vr_hands_test && vr_hands_ready() && vr_eye_cam[0].ok )
+		{
+			vr_hands_cam_t hc;
+			vr_hands_cam( &hc, vr_eye_cam[0] );
+			vr_hands_draw( &hc, NULL ); // poses sintéticas: prova a IK sem headset
+		}
 	}
 }
 

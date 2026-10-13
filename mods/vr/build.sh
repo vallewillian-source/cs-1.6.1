@@ -27,8 +27,9 @@ podman run --rm --security-opt label=disable \
     apt-get install -y -qq g++ libx11-dev libgl1-mesa-dev >/dev/null
     g++ -O2 -fPIC -shared -Wall -Wextra -std=c++17 \
       -I/api -I/oxr/include \
-      -o /src/mod_vr.so /src/mod_vr.cpp \
-      -L/oxr/lib -lopenxr_loader -lX11 \
+      -o /src/mod_vr.so \
+      /src/mod_vr.cpp /src/vr_hands.cpp \
+      -L/oxr/lib -lopenxr_loader -lX11 -ldl \
       -Wl,-rpath,"\$ORIGIN" -Wl,--no-as-needed
   '
 
@@ -40,5 +41,10 @@ done
 
 # encaixe da arma: template só na primeira vez (nunca sobrescreve a sua calibração)
 [ -e "$OUT/vr_weapon.cfg" ] || cp "$SRC/vr_weapon.cfg" "$OUT/vr_weapon.cfg"
+[ -e "$OUT/vr_hands.cfg" ] || cp "$SRC/vr_hands.cfg" "$OUT/vr_hands.cfg"
 
-echo ">> OK: game/mods/mod_vr.so"
+# assets do viewmodel proprio (CC0): copia SEMPRE (fonte de verdade é mods/vr/assets)
+mkdir -p "$OUT/vr_assets"
+cp -a "$SRC/assets/." "$OUT/vr_assets/"
+
+echo ">> OK: game/mods/mod_vr.so (+ vr_assets/)"
