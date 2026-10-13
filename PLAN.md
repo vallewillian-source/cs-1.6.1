@@ -328,5 +328,39 @@ Convenções:
 ## 8. Licenças
 
 - `xash3d-fwgs`: GPL-3.0 · `cs16-client`: GPL-2.0 → o Mod VR, por carregar junto, herda as obrigações GPL **se distribuído em binário** (uso interno/local: nenhuma obrigação).
-- ReHLDS/ReGameDLL (MIT): não são tocados pelo projeto VR.
+- ReHLDS/ReGameDLL (MIT): o projeto VR não os toca; a **trilha de bots** (§9) acrescenta um módulo próprio (`cs_bot_advisor`) ao ReGameDLL, sob a mesma licença do upstream (MIT) — ver `docs/BOTBRAIN.md`.
 - Conteúdo Valve (`cstrike/`, `valve/`): permanece fora de qualquer redistribuição.
+
+---
+
+## 9. Trilha paralela — bots com "cérebro lento" (Jev / TypeSafe)
+
+> **Status: V1 feita e verificada (2026-10-13), só de_dust2/defuse.** Não faz parte
+> do MVP de VR; usa a mesma infraestrutura de servidor e vale igual para VR e
+> flat, porque bots vivem no servidor. Documento completo: `docs/BOTBRAIN.md`.
+
+**Forma:** o CCSBot do ReGameDLL segue como músculo (nav, visão, mira, combate);
+um sidecar Python (`tools/botbrain/`) pergunta ao modelo **Jev** (TypeSafe) qual é
+o plano *do time* e devolve por arquivo; o módulo `cs_bot_advisor` (dentro do
+`cs.so`) aplica nos bots. O modelo nunca está no caminho crítico — o transporte é
+um mailbox em disco.
+
+**Decisões de forma (por que não "LLM por tique"):** bots rodam a 10–30 Hz e o
+Jev faz 1 request por decisão em centenas de ms; então o Jev decide **onde/quando
+o time compromete** (no freeze e em eventos) e os algoritmos jogam. Uma decisão
+por time por momento, cache por assinatura grosseira (economia/placar/fase/clutch)
+e fallback total para o comportamento stock.
+
+**Intents (conjunto fechado):** T `RUSH_B|RUSH_A_LONG|RUSH_A_SHORT|SPLIT_A|`
+`HOLD_AFTER_PLANT|ECO_SAVE|DEFAULT`; CT `STACK_A|STACK_B|RETAKE_A|RETAKE_B|`
+`ECO_SAVE|DEFAULT`. O mapa intent→comportamento usa só os centros de zona do
+próprio mapa (nenhuma coordenada de dust2 no código).
+
+**Verificado:** bots jogam dust2 (nav gerado, 4v4, plantam/defusam); `RUSH_B`
+planta em B e `RUSH_A_LONG` em A; o laço observe→Jev→plano→aplicado aparece no
+log do servidor; e as decisões variam com o estado (postplant→`RETAKE_*`/
+`HOLD_AFTER_PLANT`; inimigo repetindo B→`STACK_A`).
+
+**Fora da V1:** outros mapas, Jev por bot, política aprendida/destilação, chatter
+gerado, micro-gestão de compra, transporte por socket, UI.
+

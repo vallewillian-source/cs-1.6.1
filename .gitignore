@@ -12,6 +12,18 @@
 !/server/cstrike/game_init.cfg
 !/server/cstrike/listip.cfg
 !/server/cstrike/banned.cfg
+# bots + cérebro Jev (docs/BOTBRAIN.md): config, perfis de bot e nav do dust2
+!/server/cstrike/advisor.cfg
+!/server/cstrike/BotProfile.db
+!/server/cstrike/BotChatter.db
+!/server/cstrike/maps
+/server/cstrike/maps/*
+!/server/cstrike/maps/de_dust2.nav
+
+# runtime do advisor (observe/plan/cache) e rastros do sidecar
+/server/cstrike/advisor/
+tools/botbrain/traces/
+__pycache__/
 
 # game/: só o launcher e configs escritos à mão ficam versionados
 /game/*

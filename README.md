@@ -368,6 +368,25 @@ continuam abrindo os mesmos menus de sempre).
   mira), o placar e o console continuam desenhando **só no monitor** — o painel é a tela do
   menu, não um espelho da tela do jogo.
 
+## Bots com IA — "cérebro lento" (Jev / TypeSafe)
+
+O servidor dedicado roda bots de CS (ReGameDLL/CCSBot) **guiados por rodada por
+um modelo Jev (TypeSafe)**, via um sidecar Python local. O Jev escolhe o plano
+*do time* (rushar A/B, stackar, retomar, economizar) e os bots executam com os
+algoritmos de sempre. Vale igual para VR e flat — bots vivem no servidor.
+
+```bash
+scripts/run-botbrain.sh    # sidecar + servidor (de_dust2), 4v4
+```
+
+Documento completo (arquitetura, protocolo, cvars, como depurar, o que foi
+verificado): **[docs/BOTBRAIN.md](docs/BOTBRAIN.md)**.
+
+> Se o bot não andar: o `bot_enable 1` precisa estar no
+> `server/cstrike/game_init.cfg`, o `BotProfile.db` no `server/cstrike/`, e o
+> `de_dust2.nav` gerado uma vez (`bot_nav_analyze` + `bot_nav_save`). Detalhes na
+> §7 do doc acima.
+
 ## Observações e limitações
 
 - **Conteúdo**: os mapas/modelos/sons vêm do HLDS da Valve via SteamCMD
