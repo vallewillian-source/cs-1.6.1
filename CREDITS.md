@@ -76,3 +76,16 @@ Both are header-only and live in `mods/vr/third_party/`.
 Runtime software that is neither linked nor distributed, but required to play in VR on the
 reference setup: [WiVRn](https://github.com/WiVRn/WiVRn), the OpenXR runtime used to stream
 to a standalone headset. The Mod itself only speaks OpenXR and is runtime-agnostic.
+
+
+## Mod platform dependencies
+
+- Dear ImGui v1.91.9b, commit `f5befd2d29e66809cd1110a152e375a7f1981f06`,
+  including official SDL2/OpenGL2 backends — MIT, see `third_party/imgui/LICENSE.txt`.
+- nlohmann/json v3.12.0 — MIT, see `third_party/json/LICENSE.MIT`.
+
+Both are vendored from their official repositories with revision records.
+
+- Liberation Sans Regular — SIL Open Font License 1.1, vendored from the installed
+  liberation-sans-fonts distribution. See `third_party/fonts/LICENSE`. Used by the
+  native debug UI for legible Portuguese and punctuation.

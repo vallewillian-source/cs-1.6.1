@@ -1,0 +1,26 @@
+{
+  "manifest_version": 1,
+  "id": "vr",
+  "name": "Realidade virtual",
+  "version": "1.0.0",
+  "client_abi": 9,
+  "server_abi": 1,
+  "components": {
+    "client": "client.so"
+  },
+  "claims": [
+    "camera",
+    "input",
+    "pointer"
+  ],
+  "defaults": {
+    "enabled": false,
+    "panel": false
+  },
+  "capabilities": [
+    "display",
+    "input",
+    "hud",
+    "keys"
+  ]
+}

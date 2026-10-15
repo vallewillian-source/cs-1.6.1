@@ -27,14 +27,13 @@ fi
 
 # The advisor module and its hooks live in patches/ (because /src/ is a
 # re-clonable checkout excluded from the repo). Re-apply them; idempotent.
-bash "$BASE/patches/regamedll-bot-advisor/apply.sh" "$SRC"
+python3 "$BASE/scripts/apply-patches.py"
+IMAGE="${CS_BUILD_IMAGE:-localhost/cs161-build:1}"
+podman image exists "$IMAGE" || podman build -t "$IMAGE" -f "$BASE/scripts/Containerfile.mods" "$BASE/scripts"
 
 INNER=$(cat <<'EOS'
 set -e
 export DEBIAN_FRONTEND=noninteractive
-apt-get update -qq
-apt-get install -y -qq --no-install-recommends \
-  build-essential cmake g++-multilib gcc-multilib git ca-certificates >/dev/null
 mkdir -p /src/ReGameDLL_CS/build
 cd /src/ReGameDLL_CS/build
 cmake -DCMAKE_BUILD_TYPE=Release -DCMAKE_POLICY_VERSION_MINIMUM=3.5 .. >/dev/null
@@ -47,7 +46,7 @@ EOS
 podman run --rm --security-opt label=disable \
   -v "$BASE/src":/src \
   -e JOBS="$JOBS" \
-  --entrypoint bash docker.io/steamcmd/steamcmd:latest -c "$INNER"
+  --entrypoint bash "$IMAGE" -c "$INNER"
 
 install -m 0755 "$SRC/build/regamedll/cs.so" "$BASE/server/cstrike/dlls/cs.so"
 echo "== installed: $BASE/server/cstrike/dlls/cs.so =="

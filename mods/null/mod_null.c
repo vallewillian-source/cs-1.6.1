@@ -16,18 +16,11 @@ Uso:   ./xash3d -game cstrike -mod null
 // Log próprio em arquivo (mods/mod_null.log, relativo ao cwd do engine):
 // evidência determinística do ciclo de vida do Mod, independente do canal
 // de console do engine (que em modo gráfico não vai pra stdout).
-static FILE *lg;
-
+static const csmod_services_t *services;
 static void blog( const char *fmt, ... )
 {
-	va_list ap;
-
-	if( !lg )
-		return;
-	va_start( ap, fmt );
-	vfprintf( lg, fmt, ap );
-	va_end( ap );
-	fflush( lg );
+    char buf[1024]; va_list ap;va_start(ap,fmt);vsnprintf(buf,sizeof(buf),fmt,ap);va_end(ap);
+    if(services)services->Log(services->context,0,buf);
 }
 
 static const mod_engine_api_t *eng;
@@ -42,8 +35,9 @@ static void note_gated( const char *hook )
 static int Null_Init( const mod_engine_api_t *e )
 {
 	eng = e;
+	services=e->services;
 	t_start = e->DoubleTime();
-	lg = fopen( "mods/mod_null.log", "a" );
+
 	blog( "==== mod_null init: engine %s, mod api v%d ====\n", e->engine_version, MOD_API_VERSION );
 	e->Printf( "mod_null: init (engine %s, mod api v%d) — template, não altera o jogo\n",
 		e->engine_version, MOD_API_VERSION );
@@ -56,11 +50,7 @@ static void Null_Shutdown( void )
 		n_frames, n_pre, n_post, eng->DoubleTime() - t_start );
 	eng->Printf( "mod_null: shutdown — frames=%lu pre=%lu post=%lu (%.1fs)\n",
 		n_frames, n_pre, n_post, eng->DoubleTime() - t_start );
-	if( lg )
-	{
-		fclose( lg );
-		lg = NULL;
-	}
+
 }
 
 static void Null_FramePre( double time )
@@ -132,9 +122,18 @@ static mod_api_t g_api =
 	.Mod_EyeCount = NULL,  // v2: sem estéreo (capabilities=0; nunca chamado)
 	.Mod_AfterEyes = NULL,
 	.Mod_Overlay2D = NULL, // v3: idem (gated por MOD_CAP_HUD)
+	.Mod_ViewModel = NULL,
+	.Mod_Key = NULL,
+	.size = sizeof(mod_api_t),
+	.Mod_Enable = NULL,
+	.Mod_DebugPanel = NULL,
+	.Mod_WorldOverlay = NULL,
 };
 
-mod_api_t *ModGetAPI( void )
+#ifdef __cplusplus
+extern "C"
+#endif
+__attribute__((visibility("default"))) mod_api_t *ModGetAPI( void )
 {
 	return &g_api;
 }

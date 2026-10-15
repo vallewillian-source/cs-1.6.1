@@ -167,7 +167,7 @@ you can adjust fit, scale, axes and the contact sheet without restarting the gam
 | `weapon_scale_res` | 1 | multiplicative residual |
 | `weapon_grip` | −0.10 −0.23 0 | grip point in MODEL space |
 | `weapon_off` / `weapon_euler` | 0 | residual: GoldSrc units / degrees (pitch = muzzle up) |
-| `support_fwd` / `support_side` / `support_up` | 1.6 / 1.4 / 0 | where the support hand goes |
+| `support_fwd` / `support_side` / `support_up` | 1.6 / −1.4 / 0 | where the support hand goes (in the **grip frame**: `side` positive = the weapon's left, the side the palm faces) |
 | `curl_max` | 85 95 75 | maximum flexion per phalanx (degrees) |
 | `curl_pinky`…`curl_thumb` | 1.0 1.0 0.95 0.85 0.6 | weight per finger |
 | `curl_fist` | 0.75 | minimum closure of the hand that holds |
@@ -176,11 +176,12 @@ you can adjust fit, scale, axes and the contact sheet without restarting the gam
 | `holster_euler` | −70 0 0 | stored pose (negative pitch = muzzle down) |
 | `holster_radius` / `grab_radius` / `grab_hyst` | 9 / 7 / 1.7 | store / grab / hysteresis |
 | `two_hand_radius` / `two_hand_blend` | 6 / 0.5 | entering two hands / barrel weight |
+| `wrist_roll` | 1 | wrist roll: **1 = from the controller** (hold a grip-style controller upright and the weapon comes out upright), 0 = from the arm (the rig's rest pose has the palm up, which lays the weapon on its side) — see note 15 |
 | `drop_gravity` / `drop_eye_height` | 386 / 28 | fall and ground |
 | `recoil_deg` / `recoil_kick` / `recoil_interval` | 7 / 0.9 / 0.09 | visual recoil |
 | `enforce_armed` | 1 | outside the hand, the trigger does not fire |
 | `sheet` | 0 | contact sheet (see below) |
-| `synth_hands` / `synth_grip` / `synth_dist` / `synth_side` / `synth_down` | 0 / 1 / 16 / 5.5 / 9 | diagnostic synthetic hands (16 u keeps the target inside the ~22 u reach) |
+| `synth_hands` / `synth_grip` / `synth_dist` / `synth_side` / `synth_down` | 0 / 1 / 16 / 5.5 / 9 | diagnostic synthetic hands (16 u keeps the target inside the ~22 u reach; only the rear hand squeezes) |
 | `near` / `far` / `color_gamma` | 4 / 7086 / 2.2 | match the ref; the MTL's `Kd` is linear |
 
 ## Diagnosis without a headset: the contact sheets
@@ -219,16 +220,21 @@ document.</em></p>
 the thumb because the axis is computed from the rig's own rest pose.</em></p>
 
 **About the arms in the sheets.** In test mode there are no controllers: the hands sit at the
-synthetic positions from the cfg (`synth_dist/side/down`). Two consequences worth knowing before
-you judge an image:
+synthetic positions from the cfg (`synth_dist/side/down`), and the fixture is **single-handed** —
+only the rear hand squeezes, so what you see is the natural "weapon in hand" state. Two
+consequences worth knowing before you judge an image:
 
-- the **support (left) hand** is placed across the body, the way a real two-handed grip is, so its
-  arm is close to full extension — and a nearly straight arm, seen from a camera sitting on the
-  hand, reads as a wide foreshortened shape. The `braco:` line reports the numbers (`alvo` vs
-  `alcance`, and the elbow bend), so you can tell "the arm is at full stretch because the target is
-  far" from "the chain is wrong";
-- the fixture values are deliberately chosen **inside** the arm's reach (~22 u). An out-of-reach
-  target forces the arm straight and makes the sheets useless for judging the pose.
+- the fixture's hand sits **inside the reach** on purpose (~22 u): an out-of-reach target forces
+  the arm straight, and a straight arm seen from a camera sitting on the hand reads as a wide
+  foreshortened shape. The `braco:` line reports the numbers (`alvo` vs `alcance`, and the elbow
+  bend), so you can tell "the arm is stretched because the target is far" from "the chain is wrong";
+- the other arm is often **in frame and very close** (the two synthetic hands are ~3 u apart), so a
+  large smeared shape behind the hand is the other limb near the camera, not a skinning failure.
+
+Before this the fixture had **both** hands squeezing, which quietly put every sheet into the
+**two-hands** state: the rear (right) hand then carried the barrel blend on top of everything else
+and the support (left) arm was dragged to the weapon, near full extension. That is the "2× on the
+right" in bug 13 — a diagnostic artefact that was being read as a modelling defect.
 
 They are the right tool for the weapon's fit, size and position — that is what they exist for.
 
@@ -238,8 +244,9 @@ They are the right tool for the weapon's fit, size and position — that is what
 
 <p align="center"><em>The raw <code>fit</code> sheet, unedited, so the caveat above is not a claim you
 have to take on faith. This is exactly what a regenerated sheet looks like with no headset attached:
-the firing hand grips the pistol in all twelve views, and the support arm crosses the frame at full
-extension, as it does in a real two-handed grip.</em></p>
+the firing hand grips the pistol in all twelve views, and the large smeared shape in the middle-left
+view is the other arm close to the camera, not a failure — the twelve views orbit a hand that has the
+other hand about three units away.</em></p>
 
 The same drawing prints a **numeric report** in the log — it is what allows deciding without
 looking at the image:
@@ -288,15 +295,20 @@ without an equipped weapon), `VR_AIM_FROM_WEAPON=0`, `VR_BODY_YAW_LAG=0.25`,
 | Holster | report + `states` sheet | barrel at **−0.94** from the body vertical (muzzle down) |
 | States | `walk` sheet + log | **8/8** steps: grab (left), 2 hands, release the rear one, store, draw (right) |
 | Mesh follows the pose | report: `mao:` line | wrist mesh vs IK target **0.00/0.00 u**; mesh palm centre vs hand frame **0.00/0.00 u** (see note 11) |
-| Arm is not over-extended | report: `braco:` line | target 23.4/16.9 u against a reach of 21.9 u → support arm extended, firing arm bent 79° |
+| Arm is not over-extended | report: `braco:` line | target 19.6/16.9 u against a reach of 21.9 u → firing arm bent 79°, support arm bent 52° (see note 13) |
+| Wrist is not twisted | report: `punho:` line | controller × arm roll differs by only **−24/+38°** in the fixture (was ±115° while the frame was 90° out) — see note 15 |
+| Weapon sits upright | report: `arma:` line | the slide axis against the body's up reads **+1.00 / 0.00 / 0.00** (note 15) |
+| Weapon survives the spawn | `synth_grip 0` + report | with the grip at zero — the situation on the first frame — the state stays `na mao` and the pistol is in the hand (note 14) |
 | Flat did not regress | game without `VR_HANDS_TEST` | no line from the subsystem in the log; mod loads normally |
 
-The last two rows exist because of a bug that images alone did not pin down: the **wrist bone's
+The last three rows exist because of bugs that images alone did not pin down: the **wrist bone's
 world matrix** was being built with the *rest position* of the wrist baked into it, which threw the
-hand mesh ~26 u (66 cm) away from where the IK had put the wrist. The bones kept their lengths, so
-no bone-length check would have caught it — only comparing **where the skinned mesh lands** against
-**where the math says it should** does. Those two numbers are now printed on every report and must
-read `0.00`; they are the regression test for the whole class.
+hand mesh ~26 u (66 cm) away from where the IK had put the wrist — and the hand's **roll** was being
+taken from the controller's own frame, which forced an arbitrary constant twist into both wrists.
+The bones kept their lengths and the barrel kept its direction, so no bone-length or aim check would
+have caught either; only comparing **where the skinned mesh lands** against **where the math says it
+should** (bug 11) and **how much roll the controller is asking for** (bug 13) does. Those numbers are
+printed on every report and must read `0.00` / `0°`; they are the regression test for both classes.
 
 ### Still to validate with the headset (your side)
 
@@ -307,6 +319,10 @@ read `0.00`; they are the regression test for the whole class.
 5. Grab from the ground and switch hands.
 6. Barrel aim: if you prefer the previous one, `VR_AIM_FROM_WEAPON=0`.
 7. If the holster bothers you when looking sideways, turn on `VR_BODY_YAW_LAG=0.25`.
+8. The grip: with the frame fixed (note 15) the weapon should sit with the grip in the fist, the
+   slide up and the sights on the thumb side. If a hand still reads as rolled, `wrist_roll` switches
+   the roll source (1 = the controller, the default; 0 = the arm), and the log's `punho:` and `arma:`
+   lines report both the disagreement and where the slide points.
 
 ## Limits of this version
 
@@ -319,8 +335,10 @@ read `0.00`; they are the regression test for the whole class.
   dropped weapon also does not survive a map change and has no collision with the world.
 - The projectile **origin** stays at the eye (the ABI does not let it be moved) — only the
   direction comes from the barrel.
-- The fist rotates as a rigid body (the controller rotation goes into the wrist bone): there
-  is no forearm twist.
+- The hand is a rigid body: the **direction** comes from the controller and the **roll** from the
+  controller too (the player holds the controller upright), so the weapon comes out upright and the
+  wrist is not twisted. There is no twist of the forearm itself, and `wrist_roll 0` switches the
+  roll to the arm's (the rig's natural wrist) if you ever prefer that.
 - Skinning on the **CPU** in immediate mode: ~2,200 tri, 1×/frame. If it ever becomes heavy,
   the path is vertex arrays, without changing the rest.
 
@@ -376,3 +394,130 @@ read `0.00`; they are the regression test for the whole class.
     to the wrist**, which is what the hand frame expects. Both errors were the same mistake:
     an absolute coordinate where a displacement was expected, in a frame whose origin is not
     the rig origin.
+13. **The hand's ROLL was taken from the controller's frame** — reported from the headset as
+    *"both arms look as if I had rotated my wrist to the right, twice as much on the right"*.
+    The hand was built as `Rw = Bc . Br^T`, where `Bc` is the controller frame and `Br` the
+    palm frame measured in the **rig's rest pose**. That construction *forces* the palm's rest
+    frame to coincide with the controller's, so every degree of difference between "the axes the
+    runtime reports for the grip" and "the wrist this rig's rest pose has" became a **constant
+    twist of the wrist on screen**. In the fixture the controller frame is the body frame, and
+    the report measures the mismatch at **±115°** — the hands were rolled by a quarter turn.
+    Nothing was wrong with the rig: its two palm frames are a proper mirrored pair (verified by
+    comparing `palm_left` against the mirror of the other hand), the bones had the right lengths
+    and the barrel kept its direction (a roll about the barrel axis does not move the barrel,
+    which is why the aim and the fit never looked broken).
+    The fix splits the rotation by what each source actually knows:
+
+    - **direction** (where the hand points) comes from the **controller** — `aim_dir`, and in
+      two-hands mode the blend towards the support hand;
+    - **roll** (rotation about that direction) comes from the **arm**: the IK already resolved
+      the forearm, and `R(Wf3) . R(rest_world[forearm])^T` is the rig-to-world rotation that
+      carries the wrist's rest relationship. The natural roll is that frame's up axis, made
+      perpendicular to the direction (Gram-Schmidt).
+
+    `wrist_roll` picks between them (1 = the controller, the default after note 15; 0 = the arm).
+    The measuring line is `punho:`, which prints how far apart the two rolls are.
+    The **"2× on the right"** had a second, unrelated cause worth remembering: the *diagnostic*
+    fixture had both synthetic hands squeezing, which put every sheet into the **two-hands**
+    state — the rear (right) hand carried the barrel blend on top of everything else and the
+    support arm was dragged to the weapon at near-full extension. The fixture now squeezes with
+    the rear hand only, so the sheets show the natural single-handed state (the `braco:` line went
+    from `23.4 u, 5°` to `19.6 u, 52°` on the support arm). A diagnostic that silently reports a
+    different state than the one you are judging is worse than no diagnostic.
+    **Superseded by 15**: the roll from the arm removed the *symptom* of the twist, but the real
+    cause was the frame in 15 — the two hands' rest frames were not even consistent with each other.
+15. **The hand's "up" axis was the palm's NORMAL instead of the KNUCKLE LINE** — reported from the
+    headset as *"the weapon is upside down and not sitting where it naturally would"*. This is the
+    root cause of the **twist in 13 as well**, and it is one 90° error with three visible faces:
+
+    - the frame's `up` was built from `cross(palm-forward, pinky→index)` with its sign chosen by
+      "the palm faces the centre of the rig". For a hand resting palm-up or palm-down (this rig's
+      rest pose) that test is **degenerate** — it decides the sign from the small horizontal
+      component — and it did in fact resolve **differently for the two hands** (the log shows the
+      palm normal landing on `+palm_left` on one hand and `-palm_left` on the other, which is
+      geometrically impossible for a mirrored pair). So both the controller map and the weapon's
+      mount were 90° out, and inconsistently so;
+    - **what the `up` axis must be** is the axis of the **grip**: the line through the knuckles from
+      the pinky to the index. On a pistol the beavertail sits between the thumb and the index and
+      the magazine comes out at the pinky — the grip runs along the knuckle line and the slide's top
+      faces the thumb side. It is also exactly the axis a **grip-style controller** reports as "up"
+      (Touch: `+Y` comes out of the top face, where the thumb rests). Pairing the controller's `up`
+      with the hand's *knuckle line* is what makes a hand holding a controller look like a hand
+      holding a controller; pairing it with the palm's normal makes the knuckle line horizontal, and
+      a wrist whose knuckle line is horizontal is a wrist rotated ~90° — *"as if I had rotated my
+      wrist to the right"*;
+    - and the weapon, mounted with its `up` on the frame's `up`, inherited the same 90°: its **grip
+      pointed out of the palm** instead of into the fist (hence "not sitting where it naturally
+      would") and its slide faced wherever the wrong axis happened to point (hence "upside down").
+
+    The frame is now built from anatomy, and the anatomy is **checked instead of assumed**: the load
+    log prints how much the `up` axis agrees with the thumb's own position
+    (`polegar +0.93 (tem de ser +)`), which is what caught a first attempt with the sign the wrong
+    way round (`polegar -0.93`). The palm's normal is no longer used for anything — it is printed
+    only as a cross-check, because its *polarity* is the unreliable part.
+
+    Two consequences worth knowing:
+
+    - with the pairing right, the **roll can come from the controller again** (`wrist_roll 1`, the
+      new default): the player holds the controller upright, so the weapon comes out upright, and
+      there is no invented twist left to remove. `wrist_roll 0` remains as the arm-carried
+      alternative, and the log's `punho:` line now reads "controller × arm" (it dropped from
+      **±115°** of disagreement to **−24/+38°** once the frame was corrected — that gap *was* the
+      90° error, and what is left is just the honest difference between the player's wrist and the
+      rig's rest pose);
+    - the acceptance number that was missing: the sheets now print the weapon's **slide axis against
+      the body's up**, and in the fixture (where the "controller" is the body) it must read
+      `+1.00 / 0.00 / 0.00`. It read `+0.86 / −0.52` before, i.e. the weapon canted 31°, and the fit
+      line (`encaixe`) was `0.0°` the whole time — the fit was being verified along the barrel only,
+      so a roll about the barrel was invisible to it. **A fit check that cannot see a roll cannot
+      certify a grip.**
+14. **The weapon was DROPPED ON THE FLOOR on the first frame** — reported from the headset as
+    *"since we implemented the new hand-closing scheme, no weapon appears anymore; I cannot see it
+    in the hand nor in the holster"*. The release test in the state machine was "the grip is not
+    pressed":
+
+    ```c
+    if( g_ws.two_hand ? !( grip[0] || grip[1] ) : !grip[g_ws.rear] ) release();
+    ```
+
+    On the frame you spawn, **nobody is pressing anything yet** — you have not touched the grip —
+    so the weapon was released immediately: near the belly it went to the holster, otherwise it
+    was dropped on the floor wherever your controller happened to be (`arma largada no chao
+    (16 -6 -27)` in the log). The state machine then has the weapon lying **on the ground at your
+    feet**, which is why it was in neither place you looked. Grabbing is edge-triggered (you must
+    *squeeze* to pick it up) and releasing was not; it is now, on the **aggregate** "somebody is
+    holding it" (`g_ws.held`), not on "this hand's grip is at zero":
+
+    - releasing means the hand that was holding let go — so the spawn case cannot fire (nobody was
+      holding), and a hand that never squeezed cannot drop the weapon either;
+    - with two hands, `held` is the **union** of the holding hands, so letting go with the rear one
+      while the support hand still holds does not drop the weapon — a per-hand edge would have
+      broken exactly that step of the `walk` script, which is how the first attempt at this fix was
+      caught (step 6 went `na mao` instead of `no coldre`).
+
+    The log now also prints the state the weapon **is born in** (`arma nasce NA MAO`), so "the
+    weapon is not where I expect" starts with the log instead of a guess. And the sheets could not
+    have caught this one: they run the fixture with the grip pressed, which is what keeps the
+    weapon in the hand — the failing case is *the absence of a squeeze*, so the switch
+    `synth_grip 0` is part of the test (the state must stay `na mao`).
+
+
+## Mod platform v9 migration
+
+VR is now installed as `game/mods/vr/`, with its loader and assets alongside
+`client.so`. Mutable calibration lives in `game/mod-state/vr/`. The package build
+seeds only missing files, preferring the existing legacy cfg. Legacy asset paths
+inside calibrated files are resolved into the package without rewriting them.
+
+F6 opens the mod manager; F8 toggles its selected mod independently from the
+visibility of its debug window. F9 still
+controls IPD adjustment. The dedicated monitor panel was replaced by the shared
+mod UI; `VR_PANEL_DUMP` and offline hand contact sheets remain available. OpenXR
+instance creation no longer waits six seconds in the game thread. A pending
+worker cannot reactivate a disabled mod, and its library stays mapped until exit.
+
+The integration is grouped into private input, configuration, runtime and render
+implementation units, plus standalone path/diagnostic and asynchronous-lifecycle
+modules. The private units intentionally share one translation unit to preserve
+internal linkage and the established render order. Hand fit and calibration
+changes already present locally were preserved.

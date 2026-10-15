@@ -294,8 +294,8 @@ Conventions:
     drawn on the SAME production path, with body-relative views, a `tools/ppm2png.py`
     converter and a numeric report in the log. The sheets (and the report) proved the
     fit and the `walk` script proved **8/8** state-machine transitions without a headset.
-  - Doc: `docs/HANDS.md` (includes the 9 bug notes and what is missing on the headset).
-  - *Still needs the headset* (your end): the 7 checks listed in `docs/HANDS.md`.
+  - Doc: `docs/HANDS.md` (includes the bug notes and what is missing on the headset).
+  - *Still needs the headset* (your end): the checks listed in `docs/HANDS.md`.
 - [x] 🔴 **6.7b-fix The arm was posed right and the MESH was not (13/10, from the owner's headset
   report)** — *"the shoulder and the start of the arm are great, but at the forearm it got
   stretched and gigantic, so the hand ended up way out there."* The forearm mesh was stretched ~26
@@ -327,6 +327,93 @@ Conventions:
     = 19.0 cm), `walk` still **8/8**, flat mode untouched, build warning count unchanged. The
     contact sheets were re-rendered: the arms are now geometry of normal thickness with a bent
     elbow, and the hand grips the pistol.
+- [x] 🔴 **6.7b-fix3 The wrist was rolled by the CONTROLLER'S frame (13/10, from the owner's
+  headset report)** — *"both the right and the left arm look as if I had rotated my wrist to the
+  right; twice as much on the right."* Two independent causes, one modelling error and one
+  diagnostic error:
+  - **the modelling error**: the hand was `Rw = Bc . Br^T` (controller frame onto the palm frame
+    measured in the rig's rest pose), which **forces** the two frames to coincide. Every degree of
+    difference between the axes the runtime reports for a grip and the wrist this rig's rest pose
+    has therefore became a **constant twist on screen** — the same map for both hands (so both
+    looked twisted the same way), and it cannot be tuned away by any fit value. Measured in the
+    fixture: the controller frame asks for **±115°** of wrist roll. The aim and the fit never looked
+    broken because a roll **about** the barrel axis does not move the barrel;
+  - **the fix splits the rotation by what each source knows**: the **controller supplies the
+    direction** (`aim_dir`, including the two-hands blend) and the **arm supplies the roll** — the
+    IK already resolved the forearm, and `R(Wf3) . R(rest_world[forearm])^T` is the rig-to-world
+    rotation that carries the wrist's rest relationship. `wrist_roll` (default 0) blends back
+    towards the controller's roll, and `1` reproduces the previous behaviour **exactly**, so this is
+    reversible by cfg, without a rebuild;
+  - **the diagnostic error** ("twice as much on the right"): the fixture had **both** synthetic
+    hands squeezing, which put every sheet into the **two-hands** state — the rear (right) hand
+    carried the barrel blend on top of everything else, and the support (left) arm was dragged to
+    the weapon at near-full extension (`braco:` read **23.4 u / 5°**; now **19.6 u / 52°**). The
+    fixture now squeezes with the rear hand only, so the sheets show the natural single-handed state,
+    and the `states` cell for two hands stacks the hands (the support hand *in front*, as in a real
+    two-handed grip) instead of side by side, which had made the barrel point sideways;
+  - **new acceptance number**: `punho:` prints, live, how many degrees of roll the controller is
+    asking for and how many are being applied (`0` with the default cfg) — the same idea as `mao:`:
+    turn the complaint into a number that must read zero and cannot silently regress.
+  - Verified: `encaixe` unchanged (0.0° / 0.00 un / 7.48 un = 19.0 cm), `mao:` 0.00/0.00, `punho` 0°
+    applied, `walk` **8/8**, flat mode untouched (0 lines from the subsystem), same 2 build warnings.
+    All sheets re-rendered; the three images in `docs/` were regenerated because the published ones
+    came from the twisted build.
+- [x] 🔴 **6.7b-fix4 The weapon was dropped on the floor at spawn (13/10, from the owner's headset
+  report)** — *"since we implemented the new hand-closing scheme, no weapon appears anymore; I
+  cannot see it in the hand nor in the holster."* The state machine released the weapon when "the
+  grip is not pressed", and on the **first frame nobody has pressed anything yet**: the weapon was
+  let go before the player could see it, so it was lying on the ground where the controller happened
+  to be (reproduced without a headset with `synth_grip 0`: `arma largada no chao (16 -6 -27)`).
+  Grabbing already required an **edge** (you must squeeze); releasing now does too, on the
+  **aggregate** "somebody is holding it" (`g_ws.held`) instead of one hand's zero:
+  - the spawn case cannot fire (nobody was holding), and a hand that never squeezed cannot drop the
+    weapon either;
+  - with two hands, `held` is the **union** of the holding hands, so letting go with the rear hand
+    while the support hand still holds does **not** drop it. The first attempt (a per-hand edge)
+    broke exactly that: `walk` step 6 read `na mao` instead of `no coldre` — the script caught it;
+  - the log now prints the state the weapon is **born in** (`arma nasce NA MAO`), so this starts
+    with the log instead of a guess.
+  - Verified: with `synth_grip 0` the state stays `na mao` and the pistol renders in the hand
+    (sheet + `encaixe` 0.0° / 0.00 un / 19.0 cm), `walk` back to **8/8** (ground → grab left →
+    two hands → store in the holster → draw right), flat mode untouched.
+  - *Why the sheets missed it:* the fixture squeezes the rear grip, which is exactly what keeps the
+    weapon in the hand. The failing case is the **absence** of a squeeze, so `synth_grip 0` is part
+    of the test from now on.
+- [x] 🔴 **6.7b-fix5 The hand frame's "up" was the palm's normal, not the grip's axis (13/10, from
+  the owner's headset report)** — *"the weapon is upside down and not sitting where it naturally
+  would"*. **This is the root cause of 6.7b-fix3 as well** (the twisted wrists): one 90° error in the
+  hand frame, with three visible faces.
+  - the frame's `up` came from `cross(palm-forward, pinky→index)` with the sign chosen by "the palm
+    faces the centre of the rig". For a rest pose with the palm horizontal (this rig) that test is
+    **degenerate** — it decides on the small horizontal component — and it resolved **differently
+    for the two hands** (`palma x esquerda` came out `+1.00` on one hand and `-1.00` on the other,
+    impossible for a mirrored pair), so the controller map *and* the weapon's mount were 90° out,
+    inconsistently;
+  - **the axis that a grip uses is the KNUCKLE LINE** (pinky→index, continuing to the thumb): on a
+    pistol the beavertail is between the thumb and the index and the magazine exits at the pinky, so
+    the grip runs along that line and the slide's top faces the thumb side. It is also the axis a
+    **grip-style controller reports as `up`** (Touch: `+Y` out of the top face, where the thumb is).
+    Pairing the controller's `up` with the palm's normal throws the knuckle line into the horizontal,
+    and a wrist whose knuckle line is horizontal is a wrist turned ~90°;
+  - the weapon, mounted on the frame, inherited it: its **grip pointed out of the palm** (not into
+    the fist) and its slide faced the wrong way. The `encaixe` line could never see this: it measures
+    along the barrel, and a roll **about** the barrel leaves it at `0.0°`.
+  - Fix: build the frame from anatomy and **check the anatomy instead of assuming it** — the load log
+    prints the agreement between the `up` axis and the thumb's own position
+    (`polegar +0.93 (tem de ser +)`), which caught a first attempt with the sign reversed
+    (`polegar -0.93`). The palm's normal is no longer used for anything (printed only as a
+    cross-check; its polarity is the unreliable part).
+  - Consequences: the roll can come **from the controller** again (`wrist_roll 1`, the new default —
+    the player holds the controller upright, so the weapon is upright, and there is no invented twist
+    to remove). The `punho:` disagreement dropped from **±115°** to **−24/+38°**: that gap *was* the
+    90° error. `support_side` flipped to −1.4 (its axis is now the grip's left, the side the palm
+    faces). All sheets re-rendered (the three images in `docs/` again — they had been regenerated
+    from the twisted build).
+  - **New acceptance number**: the sheets print the weapon's **slide axis against the body's up**, and
+    in the fixture it must read `+1.00 / 0.00 / 0.00` (`arma:` line). It read `+0.86 / −0.52` (a 31°
+    cant) before. *A fit check that cannot see a roll cannot certify a grip.*
+  - Verified: `encaixe` unchanged (0.0° / 0.00 un / 7.48 un = 19.0 cm), `mao:` 0.00/0.00, `arma:`
+    +1.00/0.00/0.00, `walk` **8/8**, flat untouched (0 lines from the subsystem), build clean.
 - [ ] 🟢 **6.7c Registered debt (out of this stage)**: **gesture-based reload/grenade pin**,
   wrist roll on the weapon (forearm twist), haptics, sound, buy menu in VR, dropped weapon
   collision and the **remaining weapon classes** (rifle/SMG etc., which stay on the game viewmodel).
@@ -426,3 +513,44 @@ the server log; and the decisions vary with the state (postplant→`RETAKE_*`/
 **Out of V1:** other maps, Jev per bot, learned policy/distillation, generated
 chatter, buy micro-management, socket transport, UI.
 
+
+## 2026-10-15 — Independent packages and integrated diagnostics (implemented)
+
+The multi-mod plan is now implemented. The canonical platform lives in `sdk/`:
+client ABI v9, server ABI v1, generic sorted hosts, explicit exclusive ownership,
+per-mod contexts, background mailboxes/logs and copied per-view snapshots. Native
+libraries remain mapped through exit. `-nomods` is the reference path.
+
+Packages install into `game/mods/<id>/`; mutable calibration, environments, logs
+and caches live in `game/mod-state/<id>/`. The local supervisor owns only its
+session's server/client/sidecars, verifies server identity/readiness, tracks
+activation generations and shows confirmed component states. Legacy launchers
+are compatibility wrappers. The previously local first-spawn equipment fix is
+published in the new generic ReGameDLL integration patch.
+
+VR diagnostics now use shared ImGui tools; implementation units separate input,
+configuration, runtime and rendering while preserving the existing hand changes.
+OpenXR initialization no longer blocks the game for six seconds. Jev policy,
+closed vocabulary and private Python sidecar belong to `bots-jev`, with real plan
+expiry and stock-AI fallback. The SDK-only `x-ray-debug` package required no core
+identifier branch. Its construction exposed cross-architecture alignment,
+per-view projection and renderer-state gaps, which were corrected generically.
+
+F6 opens the manager, F7 hides/shows the selected panel set, F8 toggles the selected
+mod, and direct shortcuts are configurable. F9 remains VR calibration. Independent
+panels retain geometry/visibility, source/severity logs, search, pause and clear.
+Final UI review caught text-entry shortcut interference, capture after title-bar
+close and saved positions outside a smaller display; all three have regression
+coverage and were fixed.
+
+Validation: 17 contract/native tests; 25 initial live checks including invalid
+packages and exclusive conflicts; 16 applicable live checks after removing test
+packages; UI input/geometry harness; real Jev/cache; map changes away from and back
+to dust2; flat without mods; offline VR contact sheet; clean patch application and
+repeated verification; engine/server/package builds. Measured frame intervals and
+coverage limits are recorded in `docs/VALIDATION.md`. A headset pass and long
+memory soak remain explicitly unverified.
+
+Delivery profile: `flat-dev`, de_dust2, eight bots, bots-jev + x-ray-debug enabled,
+VR disabled, Bots and X-ray panels visible. See `docs/MODS.md`, `docs/BUILD.md`,
+`docs/XRAY.md` and `AGENTS.md` for extending and reproducing the platform.

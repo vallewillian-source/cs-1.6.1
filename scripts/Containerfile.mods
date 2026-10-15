@@ -1,0 +1,6 @@
+FROM docker.io/steamcmd/steamcmd:latest
+USER root
+RUN apt-get update -qq && DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends \
+    build-essential cmake python3 git gcc-multilib g++-multilib libsdl2-dev \
+    libfreetype-dev libx11-dev libgl1-mesa-dev patchelf ca-certificates \
+    && rm -rf /var/lib/apt/lists/*

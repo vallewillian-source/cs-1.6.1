@@ -14,15 +14,15 @@ set -euo pipefail
 BASE="$(cd "$(dirname "$0")/.." && pwd)"
 XASH="$BASE/src/xash3d-fwgs"
 GAME="$BASE/game"
-IMG="docker.io/steamcmd/steamcmd:latest"
+IMG="${CS_BUILD_IMAGE:-localhost/cs161-build:1}"
+python3 "$BASE/scripts/apply-patches.py"
+podman image exists "$IMG" || podman build -t "$IMG" -f "$BASE/scripts/Containerfile.mods" "$BASE/scripts"
 
 podman run --rm --security-opt label=disable -v "$XASH":/src --entrypoint bash \
   "$IMG" -exc '
-    apt-get update -qq
-    apt-get install -y -qq build-essential python3 libsdl2-dev libfreetype-dev git patchelf >/dev/null
     cd /src
     ./waf configure -T release -8
-    ./waf build -j"$(nproc)"
+    ./waf build -j4
     patchelf --replace-needed libbz2.so.1.0 libbz2.so.1 build/engine/libxash.so || true
   '
 
@@ -33,4 +33,6 @@ cp -a "$XASH/build/filesystem/filesystem_stdio.so" "$GAME/filesystem_stdio.so"
 cp -a "$XASH/build/3rdparty/mainui/libmenu.so"   "$GAME/libmenu.so"
 cp -a "$XASH/build/ref/gl/libref_gl.so"          "$GAME/libref_gl.so"
 cp -a "$XASH/build/3rdparty/extras/extras.pk3"   "$GAME/valve/extras.pk3"
+mkdir -p "$GAME/mod-tools"
+cp "$BASE/third_party/fonts/LiberationSans-Regular.ttf" "$GAME/mod-tools/"
 echo ">> OK — Xash3D instalado em $GAME"

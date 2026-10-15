@@ -155,6 +155,8 @@ Uso:   scripts/run-cs-vr.sh   (seta XR_RUNTIME_JSON do WiVRn etc.)
 
 #include "mod_api.h"
 #include "vr_font.h" // fonte bitmap do painel (gerada por gen_font.py)
+#include "vr_paths.h"
+#include "vr_async.h"
 #include "vr_hands.h" // viewmodel proprio (bracos + arma) — subsistema a parte
 
 // GL 1.x / GLX 1.2: typedefs PFN das funções de core não existem em
@@ -168,29 +170,11 @@ typedef GLXContext ( APIENTRYP PFNGLXGETCURRENTCONTEXTPROC )( void );
 
 static const mod_engine_api_t *eng;
 static bool verbose;
-static FILE *vrlog;
-
 static void logf( const char *fmt, ... ) __attribute__(( format( printf, 1, 2 )));
 static void logf( const char *fmt, ... )
 {
-	char buf[1024];
-	va_list ap;
-
-	va_start( ap, fmt );
-	vsnprintf( buf, sizeof( buf ), fmt, ap );
-	va_end( ap );
-
-	// arquivo próprio: o Con_Printf do engine não é capturado no -log
-	// para o que acontece antes do primeiro frame (ex.: o load do Mod)
-	if( !vrlog )
-		vrlog = fopen( "mods/mod_vr.log", "a" );
-	if( vrlog )
-	{
-		fprintf( vrlog, "%s", buf );
-		fflush( vrlog );
-	}
-	if( eng )
-		eng->Printf( "[mod_vr] %s", buf );
+    char buf[1024]; va_list ap; va_start(ap,fmt); vsnprintf(buf,sizeof(buf),fmt,ap); va_end(ap);
+    vr_diagnostic(CSMOD_LOG_INFO,buf);
 }
 
 // ---------------- diagnóstico: mensagens do carregamento (painel 2D) ----------------
@@ -205,23 +189,7 @@ enum vr_sev_t
 	VR_SEV_ERROR,     // falha: o VR não vai funcionar assim
 };
 
-static const int VR_MSG_MAX = 64; // anel do painel; o log em arquivo não tem limite
-
-struct vr_msg_t
-{
-	int    sev;
-	double t;             // segundos desde Mod_Init (relógio do engine)
-	char   text[168];
-};
-
-static vr_msg_t       vr_msgs[VR_MSG_MAX];      // anel (escrito sob lock)
-static vr_msg_t       vr_msg_view[VR_MSG_MAX];  // cópia p/ o frame (só main thread)
-static int            vr_msg_count;             // quantos já entraram (satura)
-static unsigned long  vr_msg_total;             // total emitido (inclusive os que saíram)
-static std::mutex     vr_msg_lock;
-static double         vr_t0;
-static int            vr_msg_view_count;        // linhas válidas em vr_msg_view
-static unsigned long  vr_msg_view_total;
+static double vr_t0;
 
 // status resumido, lido pelo painel
 static char vr_runtime[160];                // "WiVRn 26.9.0"
@@ -232,70 +200,10 @@ static std::atomic<int> vr_session_state { -1 };
 static int  vr_eye_w, vr_eye_h, vr_eye_images, vr_eye_count;
 static char vr_glx_info[128];
 
-static const char *vr_sev_tag( int sev )
-{
-	switch( sev )
-	{
-	case VR_SEV_OK:    return "OK ";
-	case VR_SEV_WARN:  return "AV ";
-	case VR_SEV_ERROR: return "ER ";
-	default:           return "   ";
-	}
-}
-
-static int vr_msg_view_errors;                  // erros presentes na cópia do frame
-static int vr_msg_view_warns;                   // avisos presentes na cópia do frame
-
-// Cópia do anel para o frame (uma vez por frame, sem GL): o painel lê a cópia,
-// nunca o anel, para não segurar o lock enquanto desenha.
-static void vr_msgs_refresh( void )
-{
-	std::lock_guard<std::mutex> lock( vr_msg_lock );
-
-	memcpy( vr_msg_view, vr_msgs, sizeof( vr_msg_t ) * (size_t)vr_msg_count );
-	vr_msg_view_count = vr_msg_count;
-	vr_msg_view_total = vr_msg_total;
-
-	vr_msg_view_errors = 0;
-	vr_msg_view_warns = 0;
-	for( int i = 0; i < vr_msg_count; i++ )
-	{
-		if( vr_msg_view[i].sev == VR_SEV_ERROR )
-			vr_msg_view_errors++;
-		else if( vr_msg_view[i].sev == VR_SEV_WARN )
-			vr_msg_view_warns++;
-	}
-}
-
 static void vr_note( int sev, const char *fmt, ... )
 {
-	char buf[sizeof( vr_msgs[0].text )];
-	va_list ap;
-
-	va_start( ap, fmt );
-	vsnprintf( buf, sizeof( buf ), fmt, ap );
-	va_end( ap );
-
-	logf( "%s", buf ); // arquivo + console: mesmo texto de antes do painel existir
-
-	std::lock_guard<std::mutex> lock( vr_msg_lock );
-
-	if( vr_msg_count >= VR_MSG_MAX ) // anel cheio: descarta a mais antiga
-	{
-		memmove( vr_msgs, vr_msgs + 1, sizeof( vr_msgs[0] ) * ( VR_MSG_MAX - 1 ));
-		vr_msg_count = VR_MSG_MAX - 1;
-	}
-
-	vr_msg_t &m = vr_msgs[vr_msg_count++];
-	m.sev = sev;
-	m.t = eng ? eng->DoubleTime() - vr_t0 : 0.0;
-	snprintf( m.text, sizeof( m.text ), "%s", buf );
-	{
-		size_t len = strlen( m.text ); // o painel desenha por linha: sem \n no fim
-		while( len > 0 && ( m.text[len - 1] == '\n' || m.text[len - 1] == '\r' ))
-			m.text[--len] = 0;
-	}
-	vr_msg_total++;
+    char buf[1024]; va_list ap; va_start(ap,fmt); vsnprintf(buf,sizeof(buf),fmt,ap); va_end(ap);
+    vr_diagnostic(sev==VR_SEV_ERROR?CSMOD_LOG_ERROR:sev==VR_SEV_WARN?CSMOD_LOG_WARN:CSMOD_LOG_INFO,buf);
 }
 
 // código de erro OpenXR → nome legível (o que o painel mostra no lugar de "-51")
@@ -452,8 +360,10 @@ static PFNGLXGETPROCADDRESSPROC glx_get_proc;
 #define GL_FUN( name, type ) static type p##name;
 GL_FUN( glBindFramebuffer, PFNGLBINDFRAMEBUFFERPROC )
 GL_FUN( glGenFramebuffers, PFNGLGENFRAMEBUFFERSPROC )
+GL_FUN( glDeleteFramebuffers, PFNGLDELETEFRAMEBUFFERSPROC )
 GL_FUN( glFramebufferTexture2D, PFNGLFRAMEBUFFERTEXTURE2DPROC )
 GL_FUN( glGenRenderbuffers, PFNGLGENRENDERBUFFERSPROC )
+GL_FUN( glDeleteRenderbuffers, PFNGLDELETERENDERBUFFERSPROC )
 GL_FUN( glBindRenderbuffer, PFNGLBINDRENDERBUFFERPROC )
 GL_FUN( glRenderbufferStorage, PFNGLRENDERBUFFERSTORAGEPROC )
 GL_FUN( glFramebufferRenderbuffer, PFNGLFRAMEBUFFERRENDERBUFFERPROC )
@@ -620,8 +530,10 @@ static bool gl_init( void )
 	#define GL_FUN( name, type ) p##name = (type)glx_get_proc(( const GLubyte * )#name ); if( !p##name ) { vr_note( VR_SEV_ERROR, "GL sem %s\n", #name ); return false; }
 	GL_FUN( glBindFramebuffer, PFNGLBINDFRAMEBUFFERPROC )
 	GL_FUN( glGenFramebuffers, PFNGLGENFRAMEBUFFERSPROC )
+GL_FUN( glDeleteFramebuffers, PFNGLDELETEFRAMEBUFFERSPROC )
 	GL_FUN( glFramebufferTexture2D, PFNGLFRAMEBUFFERTEXTURE2DPROC )
 	GL_FUN( glGenRenderbuffers, PFNGLGENRENDERBUFFERSPROC )
+GL_FUN( glDeleteRenderbuffers, PFNGLDELETERENDERBUFFERSPROC )
 	GL_FUN( glBindRenderbuffer, PFNGLBINDRENDERBUFFERPROC )
 	GL_FUN( glRenderbufferStorage, PFNGLRENDERBUFFERSTORAGEPROC )
 	GL_FUN( glFramebufferRenderbuffer, PFNGLFRAMEBUFFERRENDERBUFFERPROC )
@@ -884,712 +796,13 @@ static void pose_to_viewangles( const XrPosef &pose, float out[3] )
 	out[2] = ( float )rad2deg( atan2( -rgt[2], up[2] ));                       // roll
 }
 
-// ---------------- input VR (Fase 3) ----------------
-// Locomoção com os controles do Quest 3. O desenho:
-//
-//   VR_FramePre  xrWaitFrame/xrBeginFrame/xrLocateViews  (pose pronta)
-//                vr_actions_sync                          (xrSyncActions + leitura)
-//   Mod_Input    VR_Input                                 (preenche a amostra)
-//   CL_CreateCmd IN_ModAppendMove                         (a amostra vira usercmd)
-//   VR_Camera    yaw+snap e offset de roomscale           (só o render)
-//
-// "Orientado pela cabeça" não custa conta nenhuma: este mod injeta o yaw do HMD
-// no cmd e manda o stick cru em forwardmove/sidemove; o pmove monta o wishdir
-// com AngleVectors(cmd.viewangles) e zera wishvel[2] no chão. Ou seja, olhar
-// para cima não muda a velocidade e virar a cabeça muda a direção de andar.
-//
-// O giro é só snap (decisão de 12/10): o stick direito NÃO gira a câmera
-// continuamente, ele acumula um offset de yaw aplicado igualmente no cmd e no
-// render — senão o corpo passaria a atirar para um lado e a olhar para o outro.
-static XrActionSet xr_actionset = XR_NULL_HANDLE;
-static XrAction xr_act_move, xr_act_turn, xr_act_fire, xr_act_altfire;
-static XrAction xr_act_jump, xr_act_reload, xr_act_use, xr_act_score, xr_act_crouch, xr_act_menu, xr_act_haptic;
-static XrAction xr_act_grip[2];   // POR MAO: o grip decide quem segura a arma
-static XrAction xr_act_aim[2];
-static XrSpace  xr_aim_space[2] = { XR_NULL_HANDLE, XR_NULL_HANDLE };
-static XrPath   xr_path_hand[2] = { XR_NULL_PATH, XR_NULL_PATH };
+#include "vr_input.inc"
 
-// knobs (ver o cabeçalho do arquivo)
-static float vr_deadzone = 0.20f;         // VR_DEADZONE
-static float vr_trigger_th = 0.50f;       // VR_TRIGGER_THRESHOLD
-static float vr_squeeze_th = 0.60f;       // VR_SQUEEZE_THRESHOLD
-static float vr_snap_angle = 30.0f;       // VR_TURN_SNAP_ANGLE (graus)
-static float vr_move_scale = 1.0f;        // VR_MOVE_SCALE
-static bool  vr_left_handed;              // VR_LEFT_HANDED (troca os sticks)
-static int   vr_crouch_mode = 3;          // VR_CROUCH_MODE: 0 off, 1 físico, 2 botão, 3 os dois
-static float vr_crouch_drop = 0.25f;      // VR_CROUCH_DROP (metros)
-static bool  vr_roomscale = true;         // VR_ROOMSCALE=0 desliga a posição do HMD
-static float vr_roomscale_max = 0.6f;     // VR_ROOMSCALE_MAX (metros)
-static float vr_vignette = 0.0f;          // VR_COMFORT_VIGNETTE (0 = desligado)
-
-// estado da locomoção
-static float vr_yaw_offset;               // graus acumulados pelo snap turn
-static int   vr_snap_latch;               // 0 solto, +1/-1 lado já disparado
-static float vr_head_m[3];                // cabeça no espaço LOCAL (metros, eixos GoldSrc)
-static float vr_neutral_m[3];             // idem no último recentrar
-static bool  vr_neutral_valid;
-static bool  vr_duck_phys;
-static float vr_head_raw[3];              // pitch/yaw/roll crus do HMD (sem o snap)
-static unsigned int vr_buttons_prev;
-static float vr_vignette_now;             // intensidade da vignette neste frame
-
-// estado lido do OpenXR (por frame)
-static bool  in_valid;
-static float in_move[2], in_turn[2];
-static float in_fire, in_altfire, in_squeeze;
-static float in_grip[2];    // squeeze por mao (0 = esquerda, 1 = direita)
-// yaw do TRONCO (o coldre fica nele): com VR_BODY_YAW_LAG > 0 ele atrasa em relacao
-// a cabeca, entao olhar para o lado nao gira o coldre junto. 0 = instantaneo.
-static float  vr_body_yaw;
-static double vr_body_yaw_t;
-static float  vr_body_yaw_lag;
-static bool  in_jump, in_reload, in_use, in_score, in_crouch_btn, in_menu;
-static bool  in_menu_prev;
-static bool  in_hand_ok[2];
-static float in_hand_g[2][3];
-static char  in_profile[2][128] = { "(?)", "(?)" };
-
-// ---------------- arma na mão / mira (Fase 6) ----------------
-// Ver a seção "arma na mão" mais abaixo e o cabeçalho do arquivo.
-enum { VR_AIM_HEAD = 0, VR_AIM_LEFT = 1, VR_AIM_RIGHT = 2 };
-
-static int    vr_aim_source = VR_AIM_RIGHT; // VR_AIM_SOURCE (padrão: mão direita)
-static bool   vr_aim_from_weapon = true;    // VR_AIM_FROM_WEAPON=0 volta ao da mão
-static bool   vr_wpn_world_depth = true;    // VR_WEAPON_WORLD_DEPTH=0 desliga
-static bool   vr_move_pitch_comp;           // VR_MOVE_PITCH_COMP (padrão off)
-static XrPosef in_hand_pose[2];             // pose da mira (orientação inclusa)
-
-#define VR_WPN_CLASSES 10
-static const char *vr_wpn_class_names[VR_WPN_CLASSES] =
-{
-	"pistol", "smg", "rifle", "sniper", "heavy", "knife", "grenade", "c4", "shield", "other"
-};
-
-// tabela de encaixe, de mods/vr_weapon.cfg (hot-reload). Offset no referencial
-// da ARMA: [0] = frente (ao longo do cano), [1] = direita, [2] = cima.
-static struct
-{
-	float global[3];
-	float cls[VR_WPN_CLASSES][3];
-	bool  has_cls[VR_WPN_CLASSES];
-} vr_wpn;
-
-static int    vr_wpn_class = VR_WPN_CLASSES - 1; // classe do modelo atual
-static char   vr_wpn_model[64] = "-";            // viewmodel atual (painel/log)
-static double vr_wpn_cfg_mtime = -1.0;
-static double vr_wpn_cfg_next_t;                 // próxima checagem de mtime
-static bool   vr_wpn_debug;                      // VR_WEAPON_DEBUG: log cru 1x/s
-static double vr_wpn_dbg_next;                   // throttle do log e dos avisos
-
-// alcance máximo aceitável da mão em relação à cabeça, em unidades GoldSrc
-// (120 u ≈ 3 m — a mão real não passa de ~1,2 m). Acima disso a pose veio
-// furada e é melhor deixar a arma onde o jogo a põe do que movê-la para longe.
-#define VR_WPN_MAX_REACH 120.0f
-
-// offset sintético de teste (VR_WEAPON_TEST), em unidades GoldSrc, a partir do
-// olho; definido = ligado (inclusive "0 0 0"). Só para diagnóstico sem headset.
-static float  vr_wpn_test[3];
-static bool   vr_wpn_test_on;
-
-static float wrap180( float a )
-{
-	while( a > 180.0f ) a -= 360.0f;
-	while( a < -180.0f ) a += 360.0f;
-	return a;
-}
-
-// último componente de um path de perfil de interação, para o painel caber
-static const char *short_profile( const char *p )
-{
-	const char *s = strrchr( p, '/' );
-
-	return ( s && s[1] ) ? s + 1 : p;
-}
-
-// O jogo só tem arma na mão se o player tiver um VIEWMODEL: quem entra na
-// partida e não escolhe time fica espectador — sem arma, sem HUD e sem
-// crosshair (mas ainda andando). Sem separar isso, "a arma não aparece" parece
-// erro de posição quando pode ser o jogo sem arma nenhuma.
-//
-// Estas linhas existem para responder isso de dentro do jogo, sem depender do
-// painel nem de headset: logam quando o viewmodel MUDA e quando ele DESAPARECE
-// (o caso do espectador). Valem no flat também, porque o engine preenche
-// `model_name` de qualquer forma.
-static char vr_wpn_last_model[64] = "?"; // sentinela != "" para o 1o log sair
-static char vr_wpn_last_prof[2][128] = { "?", "?" };
-
-static void vr_wpn_diag( const mod_viewmodel_t *vm )
-{
-	// modelo do viewmodel: é a arma que o jogo quer desenhar
-	if( strcmp( vr_wpn_last_model, vm->model_name ) != 0 )
-	{
-		snprintf( vr_wpn_last_model, sizeof( vr_wpn_last_model ), "%s", vm->model_name );
-
-		if( vm->model_name[0] )
-			vr_note( VR_SEV_INFO, "arma: viewmodel do jogo = %s\n", vm->model_name );
-		else
-			vr_note( VR_SEV_WARN,
-				"arma: o JOGO nao tem viewmodel — nao ha arma para por na mao "
-				"(espectador? falta escolher time/classe; o menu e 2D, no monitor)\n" );
-	}
-
-	// perfil de interação por mão: "(nenhum)" = nenhum binding casou naquela mão.
-	// Só faz sentido com a sessão ativa (no flat não há ações).
-	if( !in_valid )
-		return;
-
-	for( int h = 0; h < 2; h++ )
-	{
-		if( strcmp( vr_wpn_last_prof[h], in_profile[h] ) == 0 )
-			continue;
-
-		snprintf( vr_wpn_last_prof[h], sizeof( vr_wpn_last_prof[h] ), "%s", in_profile[h] );
-		vr_note( VR_SEV_INFO, "arma: perfil de interacao da mao %s = %s\n",
-			h == 0 ? "esquerda" : "direita", short_profile( in_profile[h] ));
-	}
-}
-
-static void vr_recenter( void )
-{
-	vr_yaw_offset = 0.0f;
-	vr_neutral_valid = false; // vr_actions_sync recaptura no próximo frame
-	vr_duck_phys = false;
-	vr_snap_latch = 0;
-	vr_note( VR_SEV_INFO, "recentrar: giro do snap zerado e altura recalibrada\n" );
-}
-
-// roda um vetor horizontal do espaço do playspace para o do mundo: é a mesma
-// relação que o snap turn estabelece entre os dois (usada pelo roomscale e pela
-// arma, para os dois concordarem)
-static void vr_rotate_yaw_offset( float v[3] )
-{
-	float c = ( float )cos( vr_yaw_offset * M_PI / 180.0 );
-	float s = ( float )sin( vr_yaw_offset * M_PI / 180.0 );
-	float x = v[0], y = v[1];
-
-	v[0] = x * c - y * s;
-	v[1] = x * s + y * c;
-}
-
-// deslocamento horizontal do roomscale (unidades GoldSrc), já rodado pelo snap.
-// O eixo vertical NÃO entra: agachar move o corpo pelo IN_DUCK do jogo, não pela
-// câmera — se os dois acontecessem a vista desceria duas vezes.
-static void vr_roomscale_offset( float out[3] )
-{
-	out[0] = out[1] = out[2] = 0.0f;
-
-	if( !vr_roomscale || !vr_neutral_valid || !in_valid )
-		return;
-
-	float d[3] = { vr_head_m[0] - vr_neutral_m[0], vr_head_m[1] - vr_neutral_m[1], 0.0f };
-	float len = sqrtf( d[0] * d[0] + d[1] * d[1] );
-
-	if( len > vr_roomscale_max )
-	{
-		float k = vr_roomscale_max / len;
-
-		d[0] *= k;
-		d[1] *= k;
-	}
-
-	vr_rotate_yaw_offset( d );
-
-	out[0] = d[0] * UNITS_PER_METER;
-	out[1] = d[1] * UNITS_PER_METER;
-	out[2] = 0.0f;
-}
-
-// ---------------- ajuste fino do IPD (estéreo) ----------------
-// O afastamento entre as câmeras sai da posição dos dois olhos que o runtime
-// informa — e esse número é do HEADSET, não do jogo. Ele é o que decide se o par
-// funde: grande demais, objetos PRÓXIMOS pedem convergência excessiva e não
-// fundem, enquanto os distantes (disparidade minúscula) continuam parecendo
-// certos. É exatamente esse o sintoma que se corrige aqui.
-//
-// Por isso o ajuste é um DELTA sobre a base (runtime ou VR_IPD) e não um valor
-// absoluto: mexer no IPD do runtime não invalida a calibração. O delta é
-// aplicado escalando o vetor medido entre os olhos — a DIREÇÃO (o cant da ótica,
-// um eventual deslocamento vertical) fica preservada.
-//
-// Esta seção é só estado + arquivo + teclado + log; quem aplica é o VR_Camera.
-
-// Faixa do IPD FINAL, em mm. O piso é 0 e isso é FÍSICA, não escolha: com 0 mm as
-// duas câmeras ficam no mesmo ponto, os dois olhos recebem imagens idênticas e o
-// estéreo simplesmente não existe (imagem sem profundidade, "mono em VR"). Abaixo
-// de zero os olhos trocam de lado — o par vira espelho e o cérebro não funde.
-// O teto é folga de sanidade (nenhum headset chega perto disso).
-//
-// Aplicado sobre o IPD EFETIVO, não sobre o ajuste: assim a folga não muda de
-// tamanho quando a base muda (o runtime ora informa 68,3, ora 67,3 mm).
-#define VR_IPD_MIN_MM 0.0f
-#define VR_IPD_MAX_MM 110.0f
-
-// Ajuste compilado (delta em mm) — o valor que ficou melhor calibrando o Quest 3
-// aqui, para o próximo `make` já começar nele. Ordem de precedência no init:
-// este padrão < VR_IPD_ADJUST < mods/vr_ipd.cfg (a calibração ao vivo).
-//
-// −67,2 mm é o PISO na base do Quest 3 (67,2 mm): calibrando no headset o dono
-// desceu de 1 em 1 mm até as câmeras coincidirem (IPD final 0,0 mm, mono) e foi
-// ali que o par fundiu melhor — "quanto menos, melhor" até o fim da faixa. Com
-// uma base menor o init prende no piso (vr_ipd_clamp_mm) e dá no mesmo; com uma
-// base maior sobram os poucos mm que couberem, que já é quase mono.
-#define VR_IPD_DELTA_DEFAULT_MM (-67.2f)
-
-static double vr_ipd_cfg_mtime = -1.0;
-static double vr_ipd_cfg_next_t;             // próxima checagem de mtime
-
-// separação entre os olhos no referencial da CABEÇA, medida 1x por frame (o
-// delta vem do runtime no espaço de referência e giraria junto com a cabeça; no
-// referencial dela fica parado em ~(IPD, 0, 0))
-static void vr_measure_eye_delta( void )
-{
-	const XrVector3f &p0 = xr_views[0].pose.position;
-	const XrVector3f &p1 = xr_views[1].pose.position;
-	float d_ref[3] = { p1.x - p0.x, p1.y - p0.y, p1.z - p0.z };
-	float c0[3], c1[3], c2[3];
-
-	quat_matrix( xr_views[0].pose.orientation, c0, c1, c2 );
-	vr_eye_dl[0] = dot3( c0, d_ref );
-	vr_eye_dl[1] = dot3( c1, d_ref );
-	vr_eye_dl[2] = dot3( c2, d_ref );
-	vr_ipd_rt = sqrtf( dot3( vr_eye_dl, vr_eye_dl ));
-}
-
-// IPD de base em mm, tal como o runtime informa (0 = ainda sem medida dos olhos)
-static float vr_ipd_base_mm( void )
-{
-	return ( vr_ipd > 0.0f ? vr_ipd : vr_ipd_rt ) * 1000.0f;
-}
-
-// IPD que o render usa agora, em metros: base (runtime ou VR_IPD) + ajuste, já
-// preso na faixa utilizável. Com ele em 0 o VR_Camera não afasta câmera nenhuma
-// e os dois olhos desenham a MESMA imagem (mono).
-static float vr_ipd_eff( void )
-{
-	float eff = ( vr_ipd > 0.0f ? vr_ipd : vr_ipd_rt ) + vr_ipd_delta;
-
-	if( eff < VR_IPD_MIN_MM / 1000.0f )
-		eff = VR_IPD_MIN_MM / 1000.0f;
-
-	return eff;
-}
-
-// Prende um ajuste (mm) para o IPD final caber em [VR_IPD_MIN_MM, VR_IPD_MAX_MM].
-// Com a base conhecida é ela que define o quanto ainda dá para descer; sem base
-// (antes da primeira pose válida, ou arquivo editado à mão) vale um teto
-// simétrico — o render reaplica o piso de qualquer forma.
-static float vr_ipd_clamp_mm( float dmm, const char **why )
-{
-	const float base_mm = vr_ipd_base_mm();
-
-	if( why )
-		*why = NULL;
-
-	if( base_mm > 0.0f )
-	{
-		const float eff = base_mm + dmm;
-
-		if( eff < VR_IPD_MIN_MM )
-		{
-			dmm += VR_IPD_MIN_MM - eff;
-			if( why ) *why = "limite do ajuste (IPD minimo)";
-		}
-		else if( eff > VR_IPD_MAX_MM )
-		{
-			dmm -= eff - VR_IPD_MAX_MM;
-			if( why ) *why = "limite do ajuste (IPD maximo)";
-		}
-	}
-	else if( dmm > 100.0f )
-	{
-		dmm = 100.0f;
-		if( why ) *why = "limite do ajuste (IPD maximo)";
-	}
-	else if( dmm < -100.0f )
-	{
-		dmm = -100.0f;
-		if( why ) *why = "limite do ajuste (IPD minimo)";
-	}
-
-	return dmm;
-}
-
-// o arquivo guarda o DELTA (não o valor final): é o que continua fazendo sentido
-// se o IPD do headset mudar
-static void vr_ipd_cfg_save( void )
-{
-	struct stat st;
-	FILE *f = fopen( "mods/vr_ipd.cfg", "w" );
-
-	if( !f )
-		return;
-
-	fprintf( f, "# ajuste fino do IPD (estéreo) — escrito pelo mod_vr.so, não precisa editar\n" );
-	fprintf( f, "# ipd_mm é um DELTA em milímetros sobre o IPD que o runtime informa;\n" );
-	fprintf( f, "# positivo = câmeras mais afastadas. posicao = o mesmo em décimos de mm.\n" );
-	fprintf( f, "ipd_mm %.1f\n", ( double )( vr_ipd_delta * 1000.0f ));
-	fprintf( f, "posicao %d\n", vr_ipd_steps );
-	fclose( f );
-
-	// registra a mtime do que ACABAMOS de escrever: sem isto o tick veria a
-	// mudança no próximo segundo e releria o próprio arquivo (log em dobro)
-	if( stat( "mods/vr_ipd.cfg", &st ) == 0 )
-		vr_ipd_cfg_mtime = ( double )st.st_mtime;
-}
-
-static void vr_ipd_cfg_load( void )
-{
-	struct stat st;
-	const char *why = NULL;
-	float mm = 0.0f;
-	bool  got = false;
-	char  line[256];
-	FILE *f = fopen( "mods/vr_ipd.cfg", "r" );
-
-	if( stat( "mods/vr_ipd.cfg", &st ) == 0 )
-		vr_ipd_cfg_mtime = ( double )st.st_mtime;
-
-	if( !f )
-		return;
-
-	while( fgets( line, sizeof( line ), f ))
-	{
-		char *p = line;
-
-		while( *p == ' ' || *p == '\t' )
-			p++;
-
-		// 'ipd_mm' é o campo canônico (o outro, 'posicao', é o mesmo número em
-		// décimos de mm — legível para quem for reportar o valor)
-		if( sscanf( p, "ipd_mm %f", &mm ) == 1 )
-		{
-			got = true;
-			break;
-		}
-	}
-
-	fclose( f );
-
-	if( !got )
-		return;
-
-	// sanidade: arquivo editado à mão para um valor fora da faixa não deixa a
-	// imagem impossível de fundir sem o usuário perceber por quê
-	mm = vr_ipd_clamp_mm( mm, &why );
-
-	vr_ipd_delta = mm / 1000.0f;
-	vr_ipd_steps = ( int )lroundf( vr_ipd_delta * 10000.0f ); // décimos de mm
-	vr_ipd_delta_src = "vr_ipd.cfg";
-
-	vr_note( VR_SEV_INFO, "ipd: ajuste de mods/vr_ipd.cfg = %+.1f mm (posicao %+d)%s\n",
-		( double )mm, vr_ipd_steps, why ? " — preso na faixa" : "" );
-}
-
-// cronometra o arquivo no máximo 1x/s (é o que faz editar o .cfg valer sem
-// reiniciar o jogo — o mesmo padrão do vr_weapon.cfg)
-static void vr_ipd_cfg_tick( void )
-{
-	struct stat st;
-	double now;
-
-	if( !eng )
-		return;
-
-	now = eng->DoubleTime();
-
-	if( now < vr_ipd_cfg_next_t )
-		return;
-
-	vr_ipd_cfg_next_t = now + 1.0;
-
-	if( stat( "mods/vr_ipd.cfg", &st ) != 0 )
-		return;
-
-	if(( double )st.st_mtime != vr_ipd_cfg_mtime )
-		vr_ipd_cfg_load();
-}
-
-// linha única com tudo o que importa para calibrar: o valor em uso, a base de
-// onde ele saiu, o ajuste e o número da posição (décimos de mm — é o número que
-// o dono lê e reporta). Vai tanto para o log quanto para o painel.
-static void vr_ipd_state( char *buf, size_t len )
-{
-	const float base_mm = vr_ipd_base_mm();
-	int n;
-
-	// antes da primeira pose válida não existe base nenhuma: dizer "0.0 mm"
-	// seria pior do que dizer que falta a medida
-	if( base_mm <= 0.0f )
-	{
-		snprintf( buf, len, "IPD ainda sem medida do runtime | ajuste %+.1f mm | posicao %+d",
-			( double )( vr_ipd_delta * 1000.0f ), vr_ipd_steps );
-		return;
-	}
-
-	n = snprintf( buf, len, "IPD %.1f mm = base %.1f (%s) %+.1f | posicao %+d",
-		( double )( vr_ipd_eff() * 1000.0f ), ( double )base_mm, vr_ipd_base_src,
-		( double )( vr_ipd_delta * 1000.0f ), vr_ipd_steps );
-
-	// 0 mm é mono (as câmeras coincidem) — vale dizer, para não ser confundido
-	// com "o ajuste parou de funcionar"
-	if( vr_ipd_eff() <= 0.0001f && n > 0 && ( size_t )n < len )
-		snprintf( buf + n, len - n, " | MONO (cameras coincidem)" );
-	else if( vr_ipd_delta != 0.0f && n > 0 && ( size_t )n < len )
-		snprintf( buf + n, len - n, " | ajuste por %s", vr_ipd_delta_src );
-}
-
-static void vr_ipd_report( const char *why )
-{
-	char buf[192];
-
-	vr_ipd_state( buf, sizeof( buf ));
-	vr_note( VR_SEV_INFO, "ipd: %s | %s%s\n", why, buf,
-		vr_ipd_rt > 0.0f ? "" : " | (runtime ainda nao informou os olhos)" );
-	vr_ipd_cfg_save();
-}
-
-static void vr_ipd_nudge( float dmm )
-{
-	const char *why = NULL;
-	float mm = vr_ipd_clamp_mm( vr_ipd_delta * 1000.0f + dmm, &why );
-
-	vr_ipd_delta = mm / 1000.0f;
-	vr_ipd_steps = ( int )lroundf( vr_ipd_delta * 10000.0f );
-	vr_ipd_delta_src = "teclado";
-
-	vr_ipd_report( why ? why : ( dmm > 0.0f ? "afastando" : "aproximando" ));
-}
-
-static void vr_ipd_reset( void )
-{
-	if( vr_ipd_delta == 0.0f && vr_ipd_steps == 0 )
-	{
-		vr_ipd_report( "ja estava zerado" );
-		return;
-	}
-
-	vr_ipd_delta = 0.0f;
-	vr_ipd_steps = 0;
-	vr_ipd_delta_src = "-";
-
-	vr_ipd_report( "zerado (volta a base)" );
-}
-
-// Teclado do ajuste (ABI v7, Mod_Key). Só consome tecla com o modo LIGADO — fora
-// dele, devolver 1 aqui apagaria a tecla do jogo sem o usuário ter pedido nada.
-// As teclas são as de POSIÇÃO física no layout americano (o engine mapeia por
-// scancode): '-', '=', ',' e '.' ficam no mesmo lugar no ABNT2, e '['/']' NÃO
-// (ficam trocados) — por isso eles não entram.
-static int vr_ipd_key( int key, int down )
-{
-	// modo de ajuste: F9 (Home/End também, para o caso da F9 estar presa no
-	// gerenciador de janelas). Consome o down E o up, senão o jogo vê meia tecla.
-	if( key == MOD_KEY_F9 || key == MOD_KEY_HOME || key == MOD_KEY_END )
-	{
-		if( down )
-		{
-			vr_ipd_adj_on = !vr_ipd_adj_on;
-			vr_ipd_report( vr_ipd_adj_on ? "MODO DE AJUSTE LIGADO (teclas presas por este mod)"
-				: "modo de ajuste DESLIGADO (teclado de volta ao jogo)" );
-		}
-		return 1;
-	}
-
-	if( !vr_ipd_adj_on )
-		return 0;
-
-	switch( key )
-	{
-	case '-': if( down ) vr_ipd_nudge( -1.0f ); return 1;
-	case '=': if( down ) vr_ipd_nudge( +1.0f ); return 1;
-	case ',': if( down ) vr_ipd_nudge( -0.1f ); return 1;
-	case '.': if( down ) vr_ipd_nudge( +0.1f ); return 1;
-	case '0': if( down ) vr_ipd_reset();        return 1;
-	default: break;
-	}
-
-	return 0;
-}
-
-// ---------------- encaixe da arma (mods/vr_weapon.cfg) ----------------
-// O viewmodel do CS é de 1999: a origem dele é o OLHO do player e a geometria
-// (inclusive a mão desenhada) fica abaixo/à direita DISSO. Com a origem na mão,
-// o modelo aparece deslocado — este offset corrige, e é aplicado no referencial
-// da ARMA (frente/direita/cima da mão) para que girar a mão não mude o encaixe.
-//
-// Formato (uma diretiva por linha, '#' comenta, linhas vazias ignoradas):
-//   global X Y Z              padrão para todas as classes
-//   class <nome> X Y Z        sobrescreve aquela classe
-//
-// A leitura é tolerante: linha inválida é ignorada com aviso e o que já valia
-// continua valendo — o arquivo nunca deixa a arma numa posição absurda.
-
-// nome do viewmodel → classe (a tabela de encaixe usa o índice)
-static int vr_wpn_class_id( const char *name )
-{
-	static const struct { const char *tok; int cls; } map[] =
-	{
-		{ "deagle", 0 }, { "usp", 0 }, { "glock", 0 }, { "p228", 0 }, { "fiveseven", 0 }, { "elite", 0 },
-		{ "mp5", 1 }, { "tmp", 1 }, { "mac10", 1 }, { "ump45", 1 }, { "p90", 1 },
-		{ "ak47", 2 }, { "m4a1", 2 }, { "sg552", 2 }, { "aug", 2 }, { "galil", 2 }, { "famas", 2 },
-		{ "awp", 3 }, { "scout", 3 }, { "g3sg1", 3 }, { "sg550", 3 },
-		{ "m249", 4 }, { "xm1014", 4 }, { "m3", 4 },
-		{ "knife", 5 },
-		{ "hegrenade", 6 }, { "flashbang", 6 }, { "smokegrenade", 6 },
-		{ "c4", 7 }, { "shield", 8 },
-	};
-
-	for( size_t i = 0; i < sizeof( map ) / sizeof( map[0] ); i++ )
-		if( strstr( name, map[i].tok ))
-			return map[i].cls;
-
-	return VR_WPN_CLASSES - 1; // "other"
-}
-
-static void vr_wpn_cfg_load( bool first )
-{
-	struct stat st;
-	FILE *f = fopen( "mods/vr_weapon.cfg", "r" );
-
-	// registra a mtime JÁ na carga inicial: sem isto o primeiro tick veria "-1"
-	// e releria o mesmo arquivo no primeiro frame (log em dobro, à toa)
-	if( stat( "mods/vr_weapon.cfg", &st ) == 0 )
-		vr_wpn_cfg_mtime = ( double )st.st_mtime;
-
-	if( !f )
-	{
-		if( first )
-			vr_note( VR_SEV_INFO, "arma: mods/vr_weapon.cfg ausente — encaixe neutro (0 0 0)\n" );
-		return;
-	}
-
-	// trabalha numa cópia: um arquivo com erro não apaga o que já valia
-	float g[3], c[VR_WPN_CLASSES][3];
-	bool  hc[VR_WPN_CLASSES];
-	char  line[256];
-	int   n = 0;
-
-	memcpy( g, vr_wpn.global, sizeof( g ));
-	memcpy( c, vr_wpn.cls, sizeof( c ));
-	memcpy( hc, vr_wpn.has_cls, sizeof( hc ));
-
-	while( fgets( line, sizeof( line ), f ))
-	{
-		char *p = line;
-		float x, y, z;
-
-		while( *p == ' ' || *p == '\t' )
-			p++;
-
-		// tira o fim de linha antes de qualquer coisa (senão ele vai para o log)
-		size_t L = strlen( p );
-		while( L > 0 && ( p[L - 1] == '\n' || p[L - 1] == '\r' ))
-			p[--L] = 0;
-
-		if( !*p || *p == '#' )
-			continue;
-
-		if( !strncmp( p, "global", 6 ))
-		{
-			if( sscanf( p + 6, "%f %f %f", &x, &y, &z ) == 3 )
-			{
-				g[0] = x; g[1] = y; g[2] = z;
-				n++;
-			}
-			else
-			{
-				vr_note( VR_SEV_WARN, "arma: linha 'global' invalida no vr_weapon.cfg (ignorada)\n" );
-			}
-			continue;
-		}
-
-		if( !strncmp( p, "class", 5 ))
-		{
-			char nm[32];
-
-			if( sscanf( p + 5, "%31s %f %f %f", nm, &x, &y, &z ) == 4 )
-			{
-				int k = -1;
-
-				for( int i = 0; i < VR_WPN_CLASSES; i++ )
-					if( !strcmp( nm, vr_wpn_class_names[i] ))
-						k = i;
-
-				if( k >= 0 )
-				{
-					c[k][0] = x; c[k][1] = y; c[k][2] = z;
-					hc[k] = true;
-					n++;
-				}
-				else
-				{
-					vr_note( VR_SEV_WARN, "arma: classe desconhecida '%s' no vr_weapon.cfg\n", nm );
-				}
-			}
-			else
-			{
-				vr_note( VR_SEV_WARN, "arma: linha 'class' invalida no vr_weapon.cfg (ignorada)\n" );
-			}
-			continue;
-		}
-
-		vr_note( VR_SEV_WARN, "arma: linha ignorada no vr_weapon.cfg: %s\n", p );
-	}
-
-	fclose( f );
-
-	memcpy( vr_wpn.global, g, sizeof( g ));
-	memcpy( vr_wpn.cls, c, sizeof( c ));
-	memcpy( vr_wpn.has_cls, hc, sizeof( hc ));
-
-	vr_note( VR_SEV_INFO, "arma: vr_weapon.cfg lido (%d linha(s)) — global %+.0f %+.0f %+.0f\n",
-		n, ( double )g[0], ( double )g[1], ( double )g[2] );
-}
-
-// offset que vale agora: a classe do modelo, se ela tiver linha própria
-static const float *vr_wpn_active_offset( void )
-{
-	return vr_wpn.has_cls[vr_wpn_class] ? vr_wpn.cls[vr_wpn_class] : vr_wpn.global;
-}
-
-// checa a mtime do .cfg no máximo 1x/s: salvou o arquivo, o efeito aparece no
-// headset em ~1 s, sem reiniciar o jogo (é assim que se calibra o encaixe)
-static void vr_wpn_cfg_tick( void )
-{
-	struct stat st;
-	double now;
-
-	if( !eng )
-		return;
-
-	now = eng->DoubleTime();
-
-	if( now < vr_wpn_cfg_next_t )
-		return;
-
-	vr_wpn_cfg_next_t = now + 1.0;
-
-	if( stat( "mods/vr_weapon.cfg", &st ) != 0 )
-		return;
-
-	if(( double )st.st_mtime != vr_wpn_cfg_mtime )
-	{
-		vr_wpn_cfg_mtime = ( double )st.st_mtime;
-		vr_wpn_cfg_load( false );
-	}
-}
-
-static const char *vr_aim_source_name( void )
-{
-	if( vr_aim_source == VR_AIM_HEAD )
-		return "cabeca";
-
-	return vr_aim_source == VR_AIM_LEFT ? "mao esq" : "mao dir";
-}
+#include "vr_configuration.inc"
 
 static bool vr_make_action( XrAction *out, XrActionType type, const char *name, const char *label )
 {
-	XrActionCreateInfo ci { XR_TYPE_ACTION_CREATE_INFO };
+	XrActionCreateInfo ci {}; ci.type = XR_TYPE_ACTION_CREATE_INFO;
 	XrResult r;
 
 	ci.actionType = type;
@@ -1643,7 +856,7 @@ static XrResult vr_suggest_bindings( const char *profile, const VrBind *binds, i
 {
 	std::vector<XrActionSuggestedBinding> sb;
 	XrPath pp = XR_NULL_PATH;
-	XrInteractionProfileSuggestedBinding ip { XR_TYPE_INTERACTION_PROFILE_SUGGESTED_BINDING };
+	XrInteractionProfileSuggestedBinding ip {}; ip.type = XR_TYPE_INTERACTION_PROFILE_SUGGESTED_BINDING;
 	XrResult r = xrStringToPath( xr_instance, profile, &pp );
 
 	if( XR_FAILED( r ))
@@ -1688,7 +901,7 @@ static bool vr_actions_init( void )
 	if( xr_session == XR_NULL_HANDLE )
 		return false;
 
-	XrActionSetCreateInfo asc { XR_TYPE_ACTION_SET_CREATE_INFO };
+	XrActionSetCreateInfo asc {}; asc.type = XR_TYPE_ACTION_SET_CREATE_INFO;
 
 	snprintf( asc.actionSetName, XR_MAX_ACTION_SET_NAME_SIZE, "gameplay" );
 	snprintf( asc.localizedActionSetName, XR_MAX_LOCALIZED_ACTION_SET_NAME_SIZE, "Gameplay" );
@@ -1736,7 +949,7 @@ static bool vr_actions_init( void )
 
 	for( int h = 0; h < 2; h++ )
 	{
-		XrActionSpaceCreateInfo sci { XR_TYPE_ACTION_SPACE_CREATE_INFO };
+		XrActionSpaceCreateInfo sci {}; sci.type = XR_TYPE_ACTION_SPACE_CREATE_INFO;
 
 		sci.action = xr_act_aim[h];
 		sci.subactionPath = xr_path_hand[h];
@@ -1787,7 +1000,7 @@ static bool vr_actions_init( void )
 	vr_note( XR_SUCCEEDED( r ) ? VR_SEV_INFO : VR_SEV_WARN, "bindings khr/simple_controller: %s (%d)\n",
 		XR_SUCCEEDED( r ) ? "ok" : vr_xr_result_str( ( int )r ), ( int )r );
 
-	XrSessionActionSetsAttachInfo ai { XR_TYPE_SESSION_ACTION_SETS_ATTACH_INFO };
+	XrSessionActionSetsAttachInfo ai {}; ai.type = XR_TYPE_SESSION_ACTION_SETS_ATTACH_INFO;
 
 	ai.countActionSets = 1;
 	ai.actionSets = &xr_actionset;
@@ -1809,7 +1022,7 @@ static void vr_query_profiles( void )
 {
 	for( int h = 0; h < 2; h++ )
 	{
-		XrInteractionProfileState ips { XR_TYPE_INTERACTION_PROFILE_STATE };
+		XrInteractionProfileState ips {}; ips.type = XR_TYPE_INTERACTION_PROFILE_STATE;
 		char buf[XR_MAX_PATH_LENGTH] = { 0 };
 		char *dst = in_profile[h];
 		uint32_t len = 0;
@@ -1841,7 +1054,7 @@ static void vr_actions_sync( void )
 		return;
 
 	XrActiveActionSet aas { xr_actionset, XR_NULL_PATH };
-	XrActionsSyncInfo si { XR_TYPE_ACTIONS_SYNC_INFO };
+	XrActionsSyncInfo si {}; si.type = XR_TYPE_ACTIONS_SYNC_INFO;
 
 	si.countActiveActionSets = 1;
 	si.activeActionSets = &aas;
@@ -1861,10 +1074,10 @@ static void vr_actions_sync( void )
 
 	vr_query_profiles();
 
-	XrActionStateGetInfo gi { XR_TYPE_ACTION_STATE_GET_INFO };
-	XrActionStateVector2f v2 { XR_TYPE_ACTION_STATE_VECTOR2F };
-	XrActionStateFloat fv { XR_TYPE_ACTION_STATE_FLOAT };
-	XrActionStateBoolean bl { XR_TYPE_ACTION_STATE_BOOLEAN };
+	XrActionStateGetInfo gi {}; gi.type = XR_TYPE_ACTION_STATE_GET_INFO;
+	XrActionStateVector2f v2 {}; v2.type = XR_TYPE_ACTION_STATE_VECTOR2F;
+	XrActionStateFloat fv {}; fv.type = XR_TYPE_ACTION_STATE_FLOAT;
+	XrActionStateBoolean bl {}; bl.type = XR_TYPE_ACTION_STATE_BOOLEAN;
 
 	gi.subactionPath = XR_NULL_PATH;
 
@@ -1917,7 +1130,7 @@ static void vr_actions_sync( void )
 	// ORIENTAÇÃO é o eixo da mira quando VR_AIM_SOURCE é uma das mãos (Fase 6)
 	for( int h = 0; h < 2; h++ )
 	{
-		XrSpaceLocation loc { XR_TYPE_SPACE_LOCATION };
+		XrSpaceLocation loc {}; loc.type = XR_TYPE_SPACE_LOCATION;
 		float p[3];
 
 		in_hand_ok[h] = false;
@@ -2182,1449 +1395,10 @@ static void VR_Input( mod_input_sample_t *s )
 	vr_vignette_now = vr_vignette * ( act > 1.0f ? 1.0f : act );
 }
 
-// ---------------- OpenXR ----------------
-static bool xr_make_swapchains( void )
-{
-	uint32_t nvc = 0;
-	OXR( xrEnumerateViewConfigurationViews( xr_instance, xr_system, XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO, 0, &nvc, NULL ));
-	if( nvc < 2 )
-	{
-		vr_note( VR_SEV_ERROR, "view config: %u olho(s); runtime nao expoe estereo\n", nvc );
-		return false;
-	}
+#include "vr_runtime.inc"
 
-	std::vector<XrViewConfigurationView> vc( nvc, { XR_TYPE_VIEW_CONFIGURATION_VIEW } );
-	OXR( xrEnumerateViewConfigurationViews( xr_instance, xr_system, XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO, nvc, &nvc, vc.data()));
+#include "vr_render.inc"
 
-	// Formato das swapchains: precisa ser um dos que o runtime enumera (o
-	// valor 0 = GL_NONE não é válido; o Monado recusa com
-	// XR_ERROR_SWAPCHAIN_FORMAT_UNSUPPORTED). Preferimos formato LINEAR
-	// (GL_RGBA8) porque o engine escreve valores já codificados em gama: um
-	// alvo sRGB faria o compositor decodificar de novo e a imagem sairia
-	// escura. VR_SWAPCHAIN_FORMAT=<inteiro GL> força outro (diagnóstico).
-	GLint chosen_format = 0;
-	{
-		uint32_t nfmt = 0;
-		OXR( xrEnumerateSwapchainFormats( xr_session, 0, &nfmt, NULL ));
-
-		std::vector<int64_t> fmts( nfmt > 0 ? nfmt : 1, 0 );
-		OXR( xrEnumerateSwapchainFormats( xr_session, nfmt, &nfmt, fmts.data()));
-
-		const int64_t prefer[] = { GL_RGBA8, GL_SRGB8_ALPHA8 };
-		for( size_t w = 0; w < sizeof( prefer ) / sizeof( prefer[0] ) && !chosen_format; w++ )
-			for( uint32_t i = 0; i < nfmt; i++ )
-				if( fmts[i] == prefer[w] )
-				{
-					chosen_format = ( GLint )fmts[i];
-					break;
-				}
-
-		if( !chosen_format && nfmt > 0 )
-			chosen_format = ( GLint )fmts[0]; // nenhum conhecido: o primeiro serve
-
-		{
-			int over = ( int )env_float( "VR_SWAPCHAIN_FORMAT", 0.0f );
-			if( over > 0 )
-				chosen_format = over;
-		}
-
-		if( !chosen_format )
-		{
-			vr_note( VR_SEV_ERROR, "runtime nao ofereceu nenhum formato de swapchain OpenGL\n" );
-			return false;
-		}
-
-		{
-			char list[160];
-			size_t off = 0;
-
-			list[0] = 0;
-			for( uint32_t i = 0; i < nfmt && off < sizeof( list ) - 12; i++ )
-				off += ( size_t )snprintf( list + off, sizeof( list ) - off, "%s%lld", i ? " " : "", ( long long )fmts[i] );
-
-			vr_note( VR_SEV_INFO, "swapchain: formato 0x%X (%s) de [%s]\n", ( unsigned )chosen_format,
-				chosen_format == GL_RGBA8 ? "RGBA8 linear" : ( chosen_format == GL_SRGB8_ALPHA8 ? "SRGB8_ALPHA8" : "escolhido" ),
-				list );
-		}
-	}
-
-	for( uint32_t e = 0; e < 2; e++ )
-	{
-		EyeRT &rt = xr_eye[e];
-		rt.w = ( int32_t )( vc[e].recommendedImageRectWidth * vr_scale );
-		rt.h = ( int32_t )( vc[e].recommendedImageRectHeight * vr_scale );
-
-		XrSwapchainCreateInfo sci { XR_TYPE_SWAPCHAIN_CREATE_INFO };
-		sci.arraySize = 1;
-		sci.format = chosen_format;
-		sci.usageFlags = XR_SWAPCHAIN_USAGE_COLOR_ATTACHMENT_BIT;
-		sci.sampleCount = vc[e].recommendedSwapchainSampleCount;
-		sci.width = rt.w;
-		sci.height = rt.h;
-		sci.faceCount = 1;
-		sci.mipCount = 1;
-		OXR( xrCreateSwapchain( xr_session, &sci, &rt.sc ));
-
-		uint32_t nimg = 0;
-		OXR( xrEnumerateSwapchainImages( rt.sc, 0, &nimg, NULL ));
-		rt.images.resize( nimg, { XR_TYPE_SWAPCHAIN_IMAGE_OPENGL_KHR } );
-		OXR( xrEnumerateSwapchainImages( rt.sc, nimg, &nimg,
-			reinterpret_cast<XrSwapchainImageBaseHeader *>( rt.images.data())));
-
-		pglGenRenderbuffers( 1, &rt.depth );
-		pglBindRenderbuffer( GL_RENDERBUFFER, rt.depth );
-		pglRenderbufferStorage( GL_RENDERBUFFER, GL_DEPTH_COMPONENT24, rt.w, rt.h );
-
-		rt.fbos.resize( nimg, 0 );
-		pglGenFramebuffers( nimg, rt.fbos.data());
-		for( uint32_t i = 0; i < nimg; i++ )
-		{
-			pglBindFramebuffer( GL_FRAMEBUFFER, rt.fbos[i] );
-			pglFramebufferTexture2D( GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, rt.images[i].image, 0 );
-			pglFramebufferRenderbuffer( GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_RENDERBUFFER, rt.depth );
-		}
-		pglBindFramebuffer( GL_FRAMEBUFFER, 0 );
-
-		// Um FBO incompleto faz o driver DESCARTAR todo desenho em silêncio —
-		// é uma das causas de "headset preto com log limpo", então é checado.
-		if( vrglCheckFramebufferStatus )
-		{
-			pglBindFramebuffer( GL_FRAMEBUFFER, rt.fbos[0] );
-			GLenum st = vrglCheckFramebufferStatus( GL_FRAMEBUFFER );
-			pglBindFramebuffer( GL_FRAMEBUFFER, 0 );
-
-			if( st != GL_FRAMEBUFFER_COMPLETE )
-				vr_note( VR_SEV_ERROR, "FBO do olho %u INCOMPLETO: 0x%X (%s) — o desenho sera descartado\n",
-					e, ( unsigned )st, vr_fbo_status_str( ( unsigned )st ));
-			else
-				vr_note( VR_SEV_INFO, "FBO do olho %u: %dx%d completo (tex %u, depth %u)\n",
-					e, rt.w, rt.h, rt.images[0].image, rt.depth );
-		}
-
-		// guarda p/ o painel (o resumo de "olhos" na tela 2D)
-		if( e == 0 )
-		{
-			vr_eye_w = rt.w;
-			vr_eye_h = rt.h;
-			vr_eye_images = ( int )nimg;
-		}
-		vr_note( VR_SEV_OK, "olho %u: %dx%d, %u imagens\n", e, rt.w, rt.h, nimg );
-	}
-	vr_eye_count = 2;
-	return true;
-}
-
-static void xr_poll_events( void )
-{
-	XrEventDataBuffer evd { XR_TYPE_EVENT_DATA_BUFFER };
-	while( xrPollEvent( xr_instance, &evd ) == XR_SUCCESS )
-	{
-		switch( evd.type )
-		{
-		case XR_TYPE_EVENT_DATA_SESSION_STATE_CHANGED:
-		{
-			XrEventDataSessionStateChanged *sc = reinterpret_cast<XrEventDataSessionStateChanged *>( &evd );
-			vr_session_state = ( int )sc->state;
-			vr_note( VR_SEV_INFO, "sessao: estado %d (%s)\n", ( int )sc->state, vr_session_state_str( ( int )sc->state ));
-			switch( sc->state )
-			{
-			case XR_SESSION_STATE_READY:
-			{
-				XrSessionBeginInfo bi { XR_TYPE_SESSION_BEGIN_INFO };
-				bi.primaryViewConfigurationType = XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO;
-				if( XR_FAILED( xrBeginSession( xr_session, &bi )))
-					vr_note( VR_SEV_ERROR, "xrBeginSession falhou\n" );
-				else
-				{
-					xr_session_begun = true; // a partir daqui bombeamos frames
-					vr_note( VR_SEV_OK, "sessao iniciada (xrBeginSession)\n" );
-				}
-				if( xr_eye[0].sc == XR_NULL_HANDLE )
-					xr_make_swapchains();
-				break;
-			}
-			case XR_SESSION_STATE_SYNCHRONIZED:
-				// Ainda não é para desenhar no HMD, mas o bombeamento de frames
-				// continua (ver xr_session_begun) — é o que faz o runtime
-				// avançar para VISIBLE.
-				break;
-			case XR_SESSION_STATE_VISIBLE:
-			case XR_SESSION_STATE_FOCUSED:
-				vr_active = true;
-				break;
-			case XR_SESSION_STATE_STOPPING:
-				xr_end_frame();
-				xr_session_begun = false;
-				vr_active = false;
-				break;
-			case XR_SESSION_STATE_LOSS_PENDING:
-			case XR_SESSION_STATE_EXITING:
-				vr_note( VR_SEV_WARN, "sessao %s: VR desligando\n", vr_session_state_str( ( int )sc->state ));
-				xr_session_begun = false;
-				vr_active = false;
-				break;
-			default:
-				break;
-			}
-			break;
-		}
-		case XR_TYPE_EVENT_DATA_REFERENCE_SPACE_CHANGE_PENDING:
-			// O runtime recentralizou o playspace (o próprio headset faz isso, e o
-			// comando de recentrar do WiVRn também). Sem reancorar, o delta do
-			// roomscale passaria a ser medido contra uma origem que não existe mais
-			// e o jogador parece teleportar.
-			vr_neutral_valid = false;
-			vr_note( VR_SEV_INFO, "referencia recentralizada pelo runtime: ancora/altura recapturadas\n" );
-			break;
-		case XR_TYPE_EVENT_DATA_INSTANCE_LOSS_PENDING:
-			vr_note( VR_SEV_ERROR, "instancia OpenXR perdida: VR desativado\n" );
-			xr_session_begun = false;
-			vr_active = false;
-			vr_ready = false;
-			return;
-		default:
-			break;
-		}
-		evd = { XR_TYPE_EVENT_DATA_BUFFER };
-	}
-}
-
-static bool xr_begin_frame( void )
-{
-	xr_fs = { XR_TYPE_FRAME_STATE };
-	if( XR_FAILED( xrWaitFrame( xr_session, NULL, &xr_fs )))
-		return false;
-
-	vr_perf_hmd_period_ms = vr_perf_hmd_period_ms > 0.0 ? vr_perf_hmd_period_ms : xr_fs.predictedDisplayPeriod / 1000000.0;
-	vr_perf_work_t0 = vr_now(); // o trabalho do frame começa quando o HMD libera
-
-	XrFrameBeginInfo bi { XR_TYPE_FRAME_BEGIN_INFO };
-	XrResult r = xrBeginFrame( xr_session, &bi );
-	if( XR_FAILED( r ))
-	{
-		// típico sem headset ativo: sessão não está rodando
-		vr_active = false;
-		return false;
-	}
-
-	xr_frame_began = true;
-
-	xr_views[0] = { XR_TYPE_VIEW };
-	xr_views[1] = { XR_TYPE_VIEW };
-	XrViewLocateInfo vli { XR_TYPE_VIEW_LOCATE_INFO };
-	vli.viewConfigurationType = XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO;
-	vli.displayTime = xr_fs.predictedDisplayTime;
-	vli.space = xr_space;
-	uint32_t n = 0;
-	XrViewState vs { XR_TYPE_VIEW_STATE };
-	r = xrLocateViews( xr_session, &vli, &vs, 2, &n, xr_views );
-	bool valid = XR_SUCCEEDED( r ) && n == 2 &&
-		( vs.viewStateFlags & ( XR_VIEW_STATE_ORIENTATION_VALID_BIT | XR_VIEW_STATE_POSITION_VALID_BIT )) != 0;
-
-	if( !xr_views_ok && valid && verbose )
-		logf( "poses válidas chegando\n" );
-	xr_views_ok = valid;
-
-	if( vr_trace_all || vr_stereo_frames <= VR_TRACE_FRAMES )
-		vr_trace( "trace: views n=%u flags=0x%X valid=%d | pose0 pos(%.2f %.2f %.2f) ori(%.2f %.2f %.2f %.2f)\n",
-			n, ( unsigned )vs.viewStateFlags, valid ? 1 : 0,
-			( double )xr_views[0].pose.position.x, ( double )xr_views[0].pose.position.y, ( double )xr_views[0].pose.position.z,
-			( double )xr_views[0].pose.orientation.x, ( double )xr_views[0].pose.orientation.y,
-			( double )xr_views[0].pose.orientation.z, ( double )xr_views[0].pose.orientation.w );
-
-	if( valid )
-	{
-		// alimenta a câmera (afastamento entre os olhos) e o diagnóstico
-		vr_measure_eye_delta();
-		vr_log_stereo_geometry();
-	}
-
-	return true;
-}
-
-// Diagnóstico do estéreo: o que o runtime manda por olho vs. o que este mod
-// desenha. É exatamente esta comparação que explica "cada olho sozinho parece
-// ok, os dois juntos não fundem": qualquer diferença entre a pose/fov que o
-// runtime declara em xrEndFrame e a que o engine rasteriza vira erro de
-// perspectiva (ou de disparidade) que o cérebro não consegue fundir.
-static void vr_log_stereo_geometry( void )
-{
-	static int  logged;
-	static int  last_slot = -1;
-	static double last_ipd = -1.0;
-
-	const XrView &a = xr_views[0]; // olho esquerdo
-	const XrView &b = xr_views[1]; // olho direito
-
-	const double dx = ( double )( b.pose.position.x - a.pose.position.x );
-	const double dy = ( double )( b.pose.position.y - a.pose.position.y );
-	const double dz = ( double )( b.pose.position.z - a.pose.position.z );
-	const double ipd = sqrt( dx * dx + dy * dy + dz * dz );
-
-	// loga na primeira vez, de 5 em 5 s e quando o IPD muda (> 2 mm: o
-	// usuário mexeu no ajuste do headset / outro usuário entrou)
-	const int slot = ( int )( vr_now() / 5.0 );
-	if( logged && slot == last_slot && fabs( ipd - last_ipd ) < 0.002 )
-		return;
-	logged = 1;
-	last_slot = slot;
-	last_ipd = ipd;
-
-	const double d2r = 57.29577951308232;
-	const XrVector3f &pa = a.pose.position;
-	const XrVector3f &pb = b.pose.position;
-
-	// delta no referencial da cabeça: a separação "de verdade" entre os olhos.
-	// O dx global varia com a direção em que a cabeça está virada (o delta vem
-	// no espaço de referência); no referencial da cabeça ele fica parado em
-	// ~(IPD, 0, 0) — é o que o mod usa para afastar as câmeras.
-	float c0[3], c1[3], c2[3], d_ref[3] = { ( float )dx, ( float )dy, ( float )dz };
-	float dl[3];
-	quat_matrix( a.pose.orientation, c0, c1, c2 );
-	dl[0] = dot3( c0, d_ref );
-	dl[1] = dot3( c1, d_ref );
-	dl[2] = dot3( c2, d_ref );
-
-	const double ipd_gap = fabs( ipd - ( double )dl[0] );
-
-	vr_note( VR_SEV_INFO, "estereo: IPD %.1f mm do runtime (base %s, ajuste %+.1f mm = %.1f mm) | na cabeca (%.1f %.1f %.1f) mm | ori olho0/1 %s\n",
-		ipd * 1000.0, vr_ipd_base_src, ( double )( vr_ipd_delta * 1000.0f ), ( double )( vr_ipd_eff() * 1000.0f ),
-		( double )dl[0] * 1000.0, ( double )dl[1] * 1000.0, ( double )dl[2] * 1000.0,
-		( a.pose.orientation.x == b.pose.orientation.x && a.pose.orientation.y == b.pose.orientation.y
-			&& a.pose.orientation.z == b.pose.orientation.z && a.pose.orientation.w == b.pose.orientation.w )
-			? "iguais (cameras paralelas)" : "DIFERENTES (olhos canted)" );
-
-	if( ipd_gap > 0.001 )
-		vr_note( VR_SEV_WARN, "estereo: eixo dos olhos nao esta ao longo da direita da cabeca (%.1f mm fora do eixo) — headset com olhos deslocados\n",
-			ipd_gap * 1000.0 );
-
-	// assimetria da frustum: se -L != R (ou U != -D), a fov NÃO é central; o
-	// render tem que usar os mesmos quatro ângulos (fov_asym) ou o compositor
-	// estica cada olho de um jeito.
-	vr_note( VR_SEV_INFO, "estereo olho0: pos(%.1f %.1f %.1f)mm ori(%.2f %.2f %.2f %.2f) fov L%.1f R%.1f U%.1f D%.1f | assim %.1f\n",
-		( double )pa.x * 1000.0, ( double )pa.y * 1000.0, ( double )pa.z * 1000.0,
-		( double )a.pose.orientation.x, ( double )a.pose.orientation.y, ( double )a.pose.orientation.z, ( double )a.pose.orientation.w,
-		( double )- a.fov.angleLeft * d2r, ( double )a.fov.angleRight * d2r, ( double )a.fov.angleUp * d2r, ( double )- a.fov.angleDown * d2r,
-		( double )( a.fov.angleRight + a.fov.angleLeft ) * d2r );
-	vr_note( VR_SEV_INFO, "estereo olho1: pos(%.1f %.1f %.1f)mm ori(%.2f %.2f %.2f %.2f) fov L%.1f R%.1f U%.1f D%.1f | assim %.1f\n",
-		( double )pb.x * 1000.0, ( double )pb.y * 1000.0, ( double )pb.z * 1000.0,
-		( double )b.pose.orientation.x, ( double )b.pose.orientation.y, ( double )b.pose.orientation.z, ( double )b.pose.orientation.w,
-		( double )- b.fov.angleLeft * d2r, ( double )b.fov.angleRight * d2r, ( double )b.fov.angleUp * d2r, ( double )- b.fov.angleDown * d2r,
-		( double )( b.fov.angleRight + b.fov.angleLeft ) * d2r );
-}
-
-// Vignette de conforto (VR_COMFORT_VIGNETTE): escurece a periferia enquanto há
-// locomoção. Tem de ser desenhada na PRÓPRIA imagem do olho, antes do release —
-// o desenho 2D do engine sai na janela e o headset nunca o veria.
-// Malha 4x4 com alfa crescendo do centro para a borda; a interpolação do GL
-// suaviza o gradiente. Estado é salvo e restaurado (PushAttrib + push/pop de
-// matriz), então o cache de estado do ref_gl continua válido.
-static void vr_draw_vignette( int eye )
-{
-	const int N = 4;
-
-	if( eye < 0 || eye > 1 || xr_eye[eye].cur < 0 || xr_eye[eye].fbos.empty() || !vr_panel_gl_ok )
-		return;
-
-	if( xr_eye[eye].w <= 0 || xr_eye[eye].h <= 0 )
-		return;
-
-	pglBindFramebuffer( GL_FRAMEBUFFER, xr_eye[eye].fbos[xr_eye[eye].cur] );
-
-	vrglPushAttrib( GL_ALL_ATTRIB_BITS );
-	vrglMatrixMode( GL_PROJECTION ); vrglPushMatrix(); vrglLoadIdentity();
-	vrglOrtho( 0.0, 1.0, 0.0, 1.0, -1.0, 1.0 );
-	vrglMatrixMode( GL_MODELVIEW ); vrglPushMatrix(); vrglLoadIdentity();
-	vrglDisable( GL_DEPTH_TEST );
-	vrglDisable( GL_CULL_FACE );
-	vrglDisable( GL_TEXTURE_2D );
-	vrglEnable( GL_BLEND );
-	vrglBlendFunc( GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA );
-
-	for( int iy = 0; iy < N; iy++ )
-	{
-		for( int ix = 0; ix < N; ix++ )
-		{
-			vrglBegin( GL_QUADS );
-			for( int k = 0; k < 4; k++ )
-			{
-				float u = ( float )( ix + (( k == 1 || k == 2 ) ? 1 : 0 )) / N;
-				float v = ( float )( iy + ( k >= 2 ? 1 : 0 )) / N;
-				float dx = u - 0.5f, dy = v - 0.5f;
-				float r = sqrtf( dx * dx + dy * dy ) / 0.70710678f;
-				float a;
-
-				if( r > 1.0f ) r = 1.0f;
-				a = vr_vignette_now * r * r;
-				if( a > 1.0f ) a = 1.0f;
-
-				vrglColor4f( 0.0f, 0.0f, 0.0f, a );
-				vrglVertex2f( u, v );
-			}
-			vrglEnd();
-		}
-	}
-
-	vrglMatrixMode( GL_PROJECTION ); vrglPopMatrix();
-	vrglMatrixMode( GL_MODELVIEW ); vrglPopMatrix();
-	vrglPopAttrib();
-
-	pglBindFramebuffer( GL_FRAMEBUFFER, 0 );
-}
-
-static void xr_end_frame( void )
-{
-	if( !xr_frame_began )
-		return;
-
-	// Só submete o que foi de fato renderizado: as imagens dos olhos só têm
-	// conteúdo se o hook de câmera rodou (fora de um mapa o engine não desenha
-	// 3D — e, sem checar isto, o app submeteria imagens nunca renderizadas).
-	const bool rendered = xr_eye[0].cur >= 0 && xr_eye[1].cur >= 0;
-
-	// dump dos pares AQUI, com as imagens ainda adquiridas e depois de todo o
-	// desenho do frame: é exatamente o conteúdo que vai ao compositor. Fazer
-	// isto antes do 2D/painel (dentro do Mod_AfterEyes) mediria uma imagem que
-	// ainda não é a submetida — e não pegaria nada que vazasse para o olho.
-	// 4 amostras com 3 s de intervalo (cena escura não dá para medir; escolhe-se
-	// depois a de mais textura).
-	if( vr_stereo_dump_prefix[0] && vr_stereo_dump_n < 4 && vrglReadPixels
-		&& rendered && vr_now() - vr_t0 >= vr_stereo_dump_at )
-	{
-		stereo_dump();
-		vr_stereo_dump_at += 3.0f;
-	}
-
-	// vignette de conforto: entra na própria imagem do olho, antes do release
-	if( vr_vignette_now > 0.001f && rendered )
-	{
-		for( int e = 0; e < 2; e++ )
-			vr_draw_vignette( e );
-	}
-
-	// ajuste do IPD: só com o modo ligado, e DEPOIS do dump de diagnóstico (que
-	// mede o que o engine desenhou, não o que este mod escreve por cima)
-	if( rendered )
-	{
-		for( int e = 0; e < 2; e++ )
-			vr_draw_ipd_hud( e );
-	}
-
-	for( int e = 0; e < 2; e++ )
-	{
-		if( xr_eye[e].sc != XR_NULL_HANDLE && xr_eye[e].cur >= 0 )
-		{
-			XrResult rr = xrReleaseSwapchainImage( xr_eye[e].sc, NULL );
-			if( XR_FAILED( rr ))
-				vr_note( VR_SEV_WARN, "release swapchain olho %d: %d %s\n", e, ( int )rr, vr_xr_result_str( ( int )rr ));
-			xr_eye[e].cur = -1;
-		}
-	}
-
-	XrCompositionLayerProjectionView lv[2] {};
-	const bool submit = xr_views_ok && vr_active && rendered;
-
-	if( submit )
-	{
-		for( int e = 0; e < 2; e++ )
-		{
-			lv[e].type = XR_TYPE_COMPOSITION_LAYER_PROJECTION_VIEW;
-			lv[e].pose = xr_views[e].pose;
-			lv[e].fov = xr_views[e].fov;
-			lv[e].subImage.swapchain = xr_eye[e].sc;
-			lv[e].subImage.imageRect.offset = { 0, 0 };
-			lv[e].subImage.imageRect.extent = { xr_eye[e].w, xr_eye[e].h };
-			lv[e].subImage.imageArrayIndex = 0;
-		}
-	}
-
-	XrCompositionLayerProjection proj { XR_TYPE_COMPOSITION_LAYER_PROJECTION };
-	proj.space = xr_space;
-	proj.viewCount = 2;
-	proj.views = lv;
-
-	const XrCompositionLayerBaseHeader *layers[1] = { reinterpret_cast<const XrCompositionLayerBaseHeader *>( &proj ) };
-
-	XrFrameEndInfo fei { XR_TYPE_FRAME_END_INFO };
-	fei.displayTime = xr_fs.predictedDisplayTime;
-	fei.environmentBlendMode = XR_ENVIRONMENT_BLEND_MODE_OPAQUE;
-	if( submit )
-	{
-		fei.layerCount = 1;
-		fei.layers = layers;
-	}
-
-	XrResult re = xrEndFrame( xr_session, &fei );
-
-	if( XR_FAILED( re ))
-		vr_note( VR_SEV_ERROR, "xrEndFrame: %d %s (camadas=%u)\n", ( int )re, vr_xr_result_str( ( int )re ), ( unsigned )fei.layerCount );
-	else if( vr_trace_all || vr_stereo_frames <= VR_TRACE_FRAMES )
-		vr_trace( "trace: end frame %d submit=%d (views_ok=%d ativo=%d renderizado=%d) camadas=%u\n",
-			vr_stereo_frames, submit ? 1 : 0, xr_views_ok.load() ? 1 : 0, vr_active.load() ? 1 : 0,
-			rendered ? 1 : 0, ( unsigned )fei.layerCount );
-
-	xr_frame_began = false;
-
-	if( vr_perf_work_t0 > 0.0 )
-	{
-		vr_perf_work_ms += ( vr_now() - vr_perf_work_t0 ) * 1000.0;
-		vr_perf_work_t0 = 0.0;
-	}
-}
-
-// binding GLX capturado na main thread (o contexto só está ativo lá);
-// a thread de init consome isso — o xrCreateInstance do WiVRn BLOQUEIA sem
-// headset, por isso o init inteiro roda fora da main thread, com timeout.
-static XrGraphicsBindingOpenGLXlibKHR g_glbind { XR_TYPE_GRAPHICS_BINDING_OPENGL_XLIB_KHR };
-static bool g_glbind_ok = false;
-
-static bool capture_glx( void )
-{
-	g_glbind.xDisplay = pglXGetCurrentDisplay();
-	g_glbind.glxContext = pglXGetCurrentContext();
-	g_glbind.glxDrawable = pglXGetCurrentDrawable();
-	g_glbind.glxFBConfig = NULL;
-	g_glbind.visualid = 0;
-
-	// O binding XR_KHR_opengl_enable (Xlib) leva contexto + visual + fbconfig.
-	// glXQueryContext devolve **0 em sucesso** (e um código de erro X caso
-	// contrário): a versão anterior testava o retorno ao contrário, então o
-	// visual nunca era resolvido (visualid 0 / fbconfig nulo) — binding
-	// incompleto, que o runtime pode recusar ao criar a swapchain.
-	int fbid = 0;
-	if( g_glbind.xDisplay && g_glbind.glxContext
-		&& pglXQueryContext( g_glbind.xDisplay, g_glbind.glxContext, GLX_FBCONFIG_ID, &fbid ) == 0 && fbid > 0 )
-	{
-		int attribs[] = { GLX_FBCONFIG_ID, fbid, None };
-		int n = 0;
-		GLXFBConfig *cfgs = pglXChooseFBConfig( g_glbind.xDisplay, DefaultScreen( g_glbind.xDisplay ), attribs, &n );
-
-		if( cfgs && n > 0 )
-		{
-			g_glbind.glxFBConfig = cfgs[0];
-
-			XVisualInfo *vi = pglXGetVisualFromFBConfig( g_glbind.xDisplay, cfgs[0] );
-			if( vi )
-			{
-				g_glbind.visualid = ( uint32_t )vi->visualid;
-				XFree( vi );
-			}
-		}
-		if( cfgs )
-			XFree( cfgs );
-	}
-
-	// Plano B: o visual da própria janela em que o engine está desenhando.
-	// Cobre o caso em que a consulta acima não devolve nada (contexto sem
-	// fbconfig associado, GLX em cima de XWayland, etc.).
-	if( !g_glbind.visualid && g_glbind.xDisplay && g_glbind.glxDrawable )
-	{
-		XWindowAttributes wa;
-
-		if( XGetWindowAttributes( g_glbind.xDisplay, ( Window )g_glbind.glxDrawable, &wa ) && wa.visual )
-			g_glbind.visualid = ( uint32_t )wa.visual->visualid;
-	}
-
-	// idem para o fbconfig: se a consulta falhou, procura pelo visual da janela
-	if( !g_glbind.glxFBConfig && g_glbind.visualid && g_glbind.xDisplay )
-	{
-		int attribs[] = { GLX_VISUAL_ID, ( int )g_glbind.visualid, None };
-		int n = 0;
-		GLXFBConfig *cfgs = pglXChooseFBConfig( g_glbind.xDisplay, DefaultScreen( g_glbind.xDisplay ), attribs, &n );
-
-		if( cfgs && n > 0 )
-			g_glbind.glxFBConfig = cfgs[0];
-		if( cfgs )
-			XFree( cfgs );
-	}
-
-	g_glbind_ok = g_glbind.xDisplay && g_glbind.glxContext && g_glbind.glxDrawable;
-	return g_glbind_ok;
-}
-
-static void xr_init_thread( void )
-{
-	XrInstanceCreateInfo ici {};
-	ici.type = XR_TYPE_INSTANCE_CREATE_INFO;
-	strncpy( ici.applicationInfo.applicationName, "cs16-open-source", XR_MAX_APPLICATION_NAME_SIZE - 1 );
-	ici.applicationInfo.apiVersion = XR_API_VERSION_1_1; // WiVRn 26.x: runtime 1.1 (1.0 → -51)
-	static char exts[1][sizeof( "XR_KHR_opengl_enable" )] = { "XR_KHR_opengl_enable" };
-	char *extp[1] = { exts[0] };
-	ici.enabledExtensionCount = 1;
-	ici.enabledExtensionNames = ( const char *const * )extp;
-
-	XrResult r = xrCreateInstance( &ici, &xr_instance );
-	if( XR_FAILED( r ))
-	{
-		vr_note( VR_SEV_ERROR, "xrCreateInstance: %d %s\n",
-			( int )r, vr_xr_result_str( ( int )r ));
-		xr_init_failed = true;
-		xr_init_done = true;
-		return;
-	}
-
-	XrInstanceProperties ip { XR_TYPE_INSTANCE_PROPERTIES };
-	ip.type = XR_TYPE_INSTANCE_PROPERTIES;
-	if( XR_SUCCEEDED( xrGetInstanceProperties( xr_instance, &ip )))
-	{
-		snprintf( vr_runtime, sizeof( vr_runtime ), "%s %u.%u.%u", ip.runtimeName,
-			XR_VERSION_MAJOR( ip.runtimeVersion ), XR_VERSION_MINOR( ip.runtimeVersion ), XR_VERSION_PATCH( ip.runtimeVersion ));
-		vr_note( VR_SEV_INFO, "runtime: %s\n", vr_runtime );
-	}
-	else
-	{
-		snprintf( vr_runtime, sizeof( vr_runtime ), "(xrGetInstanceProperties falhou)" );
-		vr_note( VR_SEV_WARN, "xrGetInstanceProperties falhou\n" );
-	}
-
-	xr_init_done = true;
-	xr_instance_ready = true; // a partir daqui a main thread assume o setup
-}
-
-// Erro de setup: registra uma vez por código (o setup re-tenta de 1 em 1 s, e
-// repetir a mesma linha a cada segundo poluiria o painel e o log).
-static void vr_setup_error( XrResult r, const char *what )
-{
-	if( ( int )r == xr_setup_last_err )
-		return;
-	xr_setup_last_err = ( int )r;
-
-	vr_note(( r == XR_ERROR_FORM_FACTOR_UNAVAILABLE || r == XR_ERROR_SESSION_NOT_RUNNING )
-		? VR_SEV_WARN : VR_SEV_ERROR,
-		"%s: %d %s (tentando de novo)\n", what, ( int )r, vr_xr_result_str( ( int )r ));
-}
-
-// Setup da sessão — SEMPRE na main thread, com o contexto GLX current.
-// Re-tenta de 1 em 1 s para o Mod "ligar sozinho" quando o headset conectar.
-static void xr_setup_session( void )
-{
-	static PFN_xrGetOpenGLGraphicsRequirementsKHR get_reqs;
-	XrResult r;
-
-	if( xr_system == XR_NULL_SYSTEM_ID )
-	{
-		XrSystemGetInfo sgi { XR_TYPE_SYSTEM_GET_INFO };
-		sgi.formFactor = XR_FORM_FACTOR_HEAD_MOUNTED_DISPLAY;
-		r = xrGetSystem( xr_instance, &sgi, &xr_system );
-		if( XR_FAILED( r ))
-		{
-			vr_setup_error( r, "xrGetSystem(HMD)" );
-			return;
-		}
-	}
-
-	// Requisitos gráficos: OBRIGATÓRIO antes de xrCreateSession quando se usa
-	// XR_KHR_opengl_enable. Faltando, o runtime devolve
-	// -50 XR_ERROR_GRAPHICS_REQUIREMENTS_CALL_MISSING e nenhuma sessão abre
-	// (era o que travava o WiVRn; runtimes mais permissivos não reclamam).
-	if( !get_reqs )
-	{
-		XrResult rproc = xrGetInstanceProcAddr( xr_instance, "xrGetOpenGLGraphicsRequirementsKHR",
-			( PFN_xrVoidFunction * )&get_reqs );
-
-		if( XR_FAILED( rproc ) || !get_reqs )
-		{
-			vr_note( VR_SEV_ERROR, "xrGetOpenGLGraphicsRequirementsKHR indisponivel (%d): runtime sem OpenGL?\n",
-				( int )rproc );
-			xr_setup_permanent = true;
-			return;
-		}
-	}
-
-	{
-		XrGraphicsRequirementsOpenGLKHR reqs { XR_TYPE_GRAPHICS_REQUIREMENTS_OPENGL_KHR };
-		r = get_reqs( xr_instance, xr_system, &reqs );
-		if( XR_FAILED( r ))
-		{
-			vr_setup_error( r, "xrGetOpenGLGraphicsRequirementsKHR" );
-			return;
-		}
-
-		if( !xr_gl_reqs_logged )
-		{
-			unsigned req_ma = XR_VERSION_MAJOR( reqs.minApiVersionSupported );
-			unsigned req_mi = XR_VERSION_MINOR( reqs.minApiVersionSupported );
-			unsigned req_xa = XR_VERSION_MAJOR( reqs.maxApiVersionSupported );
-			unsigned req_xi = XR_VERSION_MINOR( reqs.maxApiVersionSupported );
-
-			xr_gl_reqs_logged = true;
-			vr_note( VR_SEV_INFO, "OpenGL aceito pelo runtime: %u.%u a %u.%u; contexto do jogo: %s\n",
-				req_ma, req_mi, req_xa, req_xi, vr_gl_version[0] ? vr_gl_version : "(desconhecido)" );
-
-			if( vr_gl_major )
-			{
-				int mine = vr_gl_major * 1000 + vr_gl_minor;
-				if( mine < ( int )( req_ma * 1000 + req_mi ) || mine > ( int )( req_xa * 1000 + req_xi ))
-					vr_note( VR_SEV_WARN, "contexto OpenGL %d.%d fora da faixa suportada: pode renderizar errado\n",
-						vr_gl_major, vr_gl_minor );
-			}
-		}
-	}
-
-	// A sessão precisa do contexto current NA THREAD QUE CHAMA (o compositor
-	// do runtime faz glXMakeCurrent) — por isso este código não roda na thread
-	// de init.
-	if( xr_session == XR_NULL_HANDLE )
-	{
-		XrSessionCreateInfo sci { XR_TYPE_SESSION_CREATE_INFO };
-		sci.next = &g_glbind;
-		sci.systemId = xr_system;
-
-		r = xrCreateSession( xr_instance, &sci, &xr_session );
-		if( XR_FAILED( r ))
-		{
-			xr_session = XR_NULL_HANDLE;
-			vr_setup_error( r, "xrCreateSession" );
-			return;
-		}
-		vr_note( VR_SEV_INFO, "sessao criada (video=%s, visual %u)\n", vr_video_driver, ( unsigned )g_glbind.visualid );
-	}
-
-	if( xr_space == XR_NULL_HANDLE )
-	{
-		XrReferenceSpaceCreateInfo rsi { XR_TYPE_REFERENCE_SPACE_CREATE_INFO };
-		rsi.referenceSpaceType = XR_REFERENCE_SPACE_TYPE_LOCAL;
-		rsi.poseInReferenceSpace.orientation = { 0, 0, 0, 1 };
-
-		r = xrCreateReferenceSpace( xr_session, &rsi, &xr_space );
-		if( XR_FAILED( r ))
-		{
-			vr_setup_error( r, "xrCreateReferenceSpace" );
-			return;
-		}
-	}
-
-	// Action set do input (v5). PRECISA ser ligado à sessão antes do
-	// xrBeginSession, que o xr_poll_events faz no estado READY — logo, aqui.
-	// Falha não impede o estéreo: só o input fica inerte.
-	vr_actions_init();
-
-	vr_ready = true;
-	vr_init_ms = eng ? ( eng->DoubleTime() - vr_t0 ) * 1000.0 : -1.0;
-	vr_note( VR_SEV_OK, "VR pronta em %.0f ms (aguardando estado READY do headset)\n", vr_init_ms );
-}
-
-// ---------------- render targets por olho ----------------
-static void bind_eye( int eye )
-{
-	EyeRT &rt = xr_eye[eye];
-
-	if( rt.sc == XR_NULL_HANDLE )
-		return;
-
-	if( rt.cur < 0 )
-	{
-		XrSwapchainImageAcquireInfo ai { XR_TYPE_SWAPCHAIN_IMAGE_ACQUIRE_INFO };
-		XrResult ra = xrAcquireSwapchainImage( rt.sc, &ai, reinterpret_cast<uint32_t *>( &rt.cur ));
-		if( XR_FAILED( ra ))
-		{
-			vr_note( VR_SEV_ERROR, "acquire swapchain olho %d: %d %s\n", eye, ( int )ra, vr_xr_result_str( ( int )ra ));
-			rt.cur = -1;
-			return;
-		}
-		XrSwapchainImageWaitInfo wi { XR_TYPE_SWAPCHAIN_IMAGE_WAIT_INFO };
-		wi.timeout = 100000000; // 100 ms
-		XrResult rw = xrWaitSwapchainImage( rt.sc, &wi );
-		if( XR_FAILED( rw ))
-			vr_note( VR_SEV_WARN, "wait swapchain olho %d: %d %s\n", eye, ( int )rw, vr_xr_result_str( ( int )rw ));
-
-		pglBindFramebuffer( GL_FRAMEBUFFER, rt.fbos[rt.cur] );
-
-		if( vr_debug_clear )
-		{
-			pglClearColor( eye == 0 ? 0.6f : 0.0f, 0.0f, eye == 0 ? 0.0f : 0.6f, 1.0f );
-			pglClear( GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT );
-		}
-
-		if( vr_trace_all || vr_stereo_frames <= VR_TRACE_FRAMES )
-		{
-			GLint bound = -1;
-			pglGetIntegerv( GL_DRAW_FRAMEBUFFER_BINDING, &bound );
-			vr_trace( "trace: bind olho %d -> imagem %d, fbo %u (bound=%d)\n", eye, rt.cur, rt.fbos[rt.cur], ( int )bound );
-		}
-	}
-	else
-	{
-		pglBindFramebuffer( GL_FRAMEBUFFER, rt.fbos[rt.cur] );
-	}
-}
-
-static void blit_mirror( void )
-{
-	EyeRT &rt = xr_eye[0];
-	Display *dpy = pglXGetCurrentDisplay();
-	GLXDrawable drawable = pglXGetCurrentDrawable();
-
-	if( rt.sc == XR_NULL_HANDLE || rt.cur < 0 || !dpy || !drawable )
-		return;
-
-	unsigned int dw = 0, dh = 0;
-	pglXQueryDrawable( dpy, drawable, GLX_WIDTH, &dw );
-	pglXQueryDrawable( dpy, drawable, GLX_HEIGHT, &dh );
-	if( !dw || !dh )
-		return;
-
-	GLint fbo = 0;
-	pglGetIntegerv( GL_DRAW_FRAMEBUFFER_BINDING, &fbo );
-	pglBindFramebuffer( GL_READ_FRAMEBUFFER, rt.fbos[rt.cur] );
-	pglBindFramebuffer( GL_DRAW_FRAMEBUFFER, 0 );
-	pglBlitFramebuffer( 0, 0, rt.w, rt.h, 0, 0, dw, dh, GL_COLOR_BUFFER_BIT, GL_LINEAR );
-	pglBindFramebuffer( GL_READ_FRAMEBUFFER, 0 );
-	pglBindFramebuffer( GL_DRAW_FRAMEBUFFER, ( GLuint )fbo );
-	pglViewport( 0, 0, dw, dh );
-}
-
-// ---------------- painel de debug (só na janela 2D) ----------------
-// Chamado em Mod_Overlay2D: HUD, menus, console e placar já foram desenhados e
-// o swap ainda não aconteceu — logo isto fica POR CIMA da UI do jogo. Escreve
-// só no framebuffer 2D da janela; as imagens dos olhos vivem nas swapchains do
-// HMD e são submetidas em Mod_EndFrame, então o headset nunca recebe o painel.
-static GLuint vr_font_tex;
-static int    vr_font_tex_state; // 0 = ainda não tentou, 1 = criada, -1 = falhou
-
-static const int VR_PANEL_COLS = 78; // largura nominal do painel, em caracteres
-
-static const float COL_BG[4]    = { 0.031f, 0.055f, 0.086f, 0.87f };
-static const float COL_LINE[4]  = { 0.26f, 0.36f, 0.47f, 1.00f };
-static const float COL_HDR[4]   = { 0.95f, 0.97f, 1.00f, 1.00f };
-static const float COL_DIM[4]   = { 0.45f, 0.54f, 0.64f, 1.00f };
-static const float COL_INFO[4]  = { 0.72f, 0.79f, 0.87f, 1.00f };
-static const float COL_OK[4]    = { 0.31f, 0.86f, 0.55f, 1.00f };
-static const float COL_WARN[4]  = { 0.96f, 0.65f, 0.14f, 1.00f };
-static const float COL_ERR[4]   = { 1.00f, 0.36f, 0.36f, 1.00f };
-
-static const float *vr_sev_color( int sev )
-{
-	switch( sev )
-	{
-	case VR_SEV_OK:    return COL_OK;
-	case VR_SEV_WARN:  return COL_WARN;
-	case VR_SEV_ERROR: return COL_ERR;
-	default:           return COL_INFO;
-	}
-}
-
-// textura 1:1 do atlas (GL_ALPHA: 0 = transparente), sem filtragem
-static bool panel_font_texture( void )
-{
-	if( vr_font_tex_state == 1 )
-		return true;
-
-	vrglPixelStorei( GL_UNPACK_ALIGNMENT, 1 );
-	vrglGenTextures( 1, &vr_font_tex );
-	if( !vr_font_tex )
-	{
-		vr_font_tex_state = -1;
-		return false;
-	}
-
-	vrglBindTexture( GL_TEXTURE_2D, vr_font_tex );
-	vrglTexParameteri( GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST );
-	vrglTexParameteri( GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST );
-	vrglTexImage2D( GL_TEXTURE_2D, 0, GL_ALPHA, VR_FONT_ATLAS_W, VR_FONT_ATLAS_H, 0,
-		GL_ALPHA, GL_UNSIGNED_BYTE, vr_font_atlas );
-
-	vr_font_tex_state = 1;
-	return true;
-}
-
-static void panel_rect( float x0, float y0, float x1, float y1, const float c[4] )
-{
-	vrglDisable( GL_TEXTURE_2D );
-	vrglColor4f( c[0], c[1], c[2], c[3] );
-	vrglBegin( GL_QUADS );
-	vrglVertex2f( x0, y0 );
-	vrglVertex2f( x1, y0 );
-	vrglVertex2f( x1, y1 );
-	vrglVertex2f( x0, y1 );
-	vrglEnd();
-}
-
-// uma linha de texto; para no máximo `max_chars` caracteres (0 = tudo), para
-// nada escapar do fundo do painel. Retorna a largura desenhada (px).
-static float panel_text( float x, float y, float sc, const char *s, const float c[4], int max_chars )
-{
-	const float cw = VR_FONT_W * sc, chh = VR_FONT_H * sc;
-	const float u = 1.0f / VR_FONT_COLS, v = 1.0f / VR_FONT_ROWS;
-	float x0 = x;
-
-	if( !panel_font_texture())
-		return 0.0f;
-
-	vrglEnable( GL_TEXTURE_2D );
-	vrglBindTexture( GL_TEXTURE_2D, vr_font_tex );
-	vrglColor4f( c[0], c[1], c[2], c[3] );
-
-	vrglBegin( GL_QUADS );
-	for( const char *p = s; *p; p++ )
-	{
-		int ch = ( unsigned char )*p;
-
-		if( max_chars > 0 && ( int )( p - s ) >= max_chars )
-			break;
-
-		if( ch < VR_FONT_FIRST || ch > VR_FONT_LAST )
-		{
-			x += cw;
-			continue;
-		}
-
-		int idx = ch - VR_FONT_FIRST;
-		float u0 = ( idx % VR_FONT_COLS ) * u;
-		float v0 = ( idx / VR_FONT_COLS ) * v;
-		float u1 = u0 + u, v1 = v0 + v;
-
-		vrglTexCoord2f( u0, v0 ); vrglVertex2f( x, y );
-		vrglTexCoord2f( u1, v0 ); vrglVertex2f( x + cw, y );
-		vrglTexCoord2f( u1, v1 ); vrglVertex2f( x + cw, y + chh );
-		vrglTexCoord2f( u0, v1 ); vrglVertex2f( x, y + chh );
-		x += cw;
-	}
-	vrglEnd();
-	vrglDisable( GL_TEXTURE_2D );
-
-	return x - x0;
-}
-
-// Dump único do framebuffer 2D (PPM, sem dependência de encoder): serve para
-// levar o estado do painel junto de um relato de problema quando a máquina não
-// tem como capturar a janela (Wayland sem portal, por exemplo).
-static void panel_dump( int W, int H )
-{
-	FILE *f = fopen( vr_panel_dump_path, "wb" );
-
-	vr_panel_dump_done = true;
-
-	if( !f )
-	{
-		vr_note( VR_SEV_WARN, "painel: nao consegui abrir %s para dump\n", vr_panel_dump_path );
-		return;
-	}
-
-	std::vector<unsigned char> px( ( size_t )W * H * 4 );
-	// lê sempre da JANELA (FBO 0): é o alvo do painel, e ler de outro FBO daria
-	// um recorte do tamanho errado quando o VR está ativo
-	pglBindFramebuffer( GL_FRAMEBUFFER, 0 );
-	vrglPixelStorei( GL_PACK_ALIGNMENT, 1 );
-	vrglReadPixels( 0, 0, W, H, GL_RGBA, GL_UNSIGNED_BYTE, px.data());
-
-	fprintf( f, "P6\n%d %d\n255\n", W, H );
-	for( int y = H - 1; y >= 0; y-- ) // OpenGL lê com origem embaixo; PPM é de cima
-	{
-		for( int x = 0; x < W; x++ )
-		{
-			const unsigned char *p = &px[(( size_t )y * W + x) * 4];
-			fputc( p[0], f );
-			fputc( p[1], f );
-			fputc( p[2], f );
-		}
-	}
-	fclose( f );
-
-	vr_note( VR_SEV_OK, "painel: dump %dx%d salvo em %s\n", W, H, vr_panel_dump_path );
-}
-
-// Dump do PAR estéreo: grava as duas imagens dos olhos do MESMO quadro, para
-// conferir fora do headset se o par casa (mesma escala e disparidade pequena e
-// coerente entre os olhos). "Cada olho sozinho parece bom, os dois juntos não
-// fundem" é um sintoma que só se mede comparando as duas imagens — com o
-// headset na cara não dá para separar erro de geometria de desconforto.
-static void stereo_dump( void )
-{
-	std::vector<unsigned char> px;
-	GLint prev = 0;
-
-	pglGetIntegerv( GL_DRAW_FRAMEBUFFER_BINDING, &prev );
-	vr_stereo_dump_n++;
-
-	for( int e = 0; e < 2; e++ )
-	{
-		char path[320];
-		FILE *f;
-
-		if( xr_eye[e].fbos[0] == 0 || xr_eye[e].w <= 0 || xr_eye[e].h <= 0 )
-			continue;
-
-		snprintf( path, sizeof( path ), "%s-%d-eye%d.ppm", vr_stereo_dump_prefix, vr_stereo_dump_n, e );
-		f = fopen( path, "wb" );
-		if( !f )
-		{
-			vr_note( VR_SEV_WARN, "estereo: nao consegui abrir %s para dump\n", path );
-			continue;
-		}
-
-		px.resize(( size_t )xr_eye[e].w * xr_eye[e].h * 4 );
-		pglBindFramebuffer( GL_FRAMEBUFFER, xr_eye[e].fbos[0] );
-		vrglPixelStorei( GL_PACK_ALIGNMENT, 1 );
-		vrglReadPixels( 0, 0, xr_eye[e].w, xr_eye[e].h, GL_RGBA, GL_UNSIGNED_BYTE, px.data());
-
-		fprintf( f, "P6\n%d %d\n255\n", xr_eye[e].w, xr_eye[e].h );
-		for( int y = xr_eye[e].h - 1; y >= 0; y-- ) // GL lê de baixo; PPM de cima
-		{
-			for( int x = 0; x < xr_eye[e].w; x++ )
-			{
-				const unsigned char *p = &px[(( size_t )y * xr_eye[e].w + x) * 4];
-				fputc( p[0], f );
-				fputc( p[1], f );
-				fputc( p[2], f );
-			}
-		}
-		fclose( f );
-
-		vr_note( VR_SEV_OK, "estereo: dump olho %d %dx%d -> %s\n", e, xr_eye[e].w, xr_eye[e].h, path );
-	}
-
-	pglBindFramebuffer( GL_FRAMEBUFFER, ( GLuint )prev );
-	vr_gl_check( "dump estereo" );
-}
-
-static void panel_draw( void )
-{
-	if( !vr_panel || !vr_panel_gl_ok )
-		return;
-
-	// espaço de coordenadas = o mesmo em que o engine acabou de desenhar o 2D
-	// (R_Set2DMode fixa o viewport no alvo 2D), então o painel fica correto
-	// com ou sem render target interno do ref_gl
-	GLint vp[4] = { 0, 0, 0, 0 };
-	pglGetIntegerv( GL_VIEWPORT, vp );
-
-	int W = vp[2], H = vp[3];
-	if( W <= 0 || H <= 0 )
-	{
-		Display *dpy = pglXGetCurrentDisplay();
-		GLXDrawable dr = pglXGetCurrentDrawable();
-		unsigned int dw = 0, dh = 0;
-
-		if( !dpy || !dr )
-			return;
-		pglXQueryDrawable( dpy, dr, GLX_WIDTH, &dw );
-		pglXQueryDrawable( dpy, dr, GLX_HEIGHT, &dh );
-		W = ( int )dw;
-		H = ( int )dh;
-		if( W <= 0 || H <= 0 )
-			return;
-	}
-
-	int sc = vr_panel_scale;
-	if( 24 + VR_PANEL_COLS * VR_FONT_W * sc > W ) // não cabe: reduz a fonte
-		sc = ( W - 24 ) / ( VR_PANEL_COLS * VR_FONT_W );
-	if( sc < 1 ) sc = 1;
-
-	// O alvo tem que ser a JANELA, explícito: o blit do espelho (Mod_AfterEyes)
-	// salva e RESTAURA o FBO que estava ligado — que no VR ativo é o do último
-	// olho. Sem este bind o painel era desenhado dentro da imagem do olho e
-	// aparecia no HEADSET, que é exatamente o contrário do que ele serve (o
-	// headset não tem como mostrar o log de inicialização, e a imagem do olho
-	// ainda ia com o painel colado nela).
-	GLint prev_draw = 0, prev_read = 0;
-	pglGetIntegerv( GL_DRAW_FRAMEBUFFER_BINDING, &prev_draw );
-	pglGetIntegerv( GL_READ_FRAMEBUFFER_BINDING, &prev_read );
-	pglBindFramebuffer( GL_FRAMEBUFFER, 0 ); // desenha E lê da janela
-
-	const float cw = VR_FONT_W * sc;
-	const float chh = VR_FONT_H * sc;
-	const float x = 12.0f;
-	float y = 10.0f;
-
-	// cabeçalho fixo + rodapé; o resto do painel é a lista de mensagens
-	// (16 = inclui as 2 linhas dos menus no VR, Fase 4)
-	const int fixas = 16;
-	int max_msgs = ( int )(( H - 20 ) / chh ) - fixas;
-	int omitidas = 0;
-	int first_msg = 0;
-
-	if( max_msgs < 1 ) max_msgs = 1;
-	if( vr_msg_view_count > max_msgs )
-	{
-		omitidas = vr_msg_view_count - ( max_msgs - 1 );
-		first_msg = omitidas;
-		max_msgs -= 1; // linha "-- N anteriores omitidas --"
-	}
-
-	const int n_msgs = vr_msg_view_count - first_msg;
-	const int n_linhas = fixas + ( vr_msg_view_count > 0 ? n_msgs + ( omitidas ? 1 : 0 ) : 1 );
-
-	// fundo do painel (cobre só o que vai ser escrito)
-	vrglPushAttrib( GL_ALL_ATTRIB_BITS );
-
-	{
-		static bool logged;
-		GLint vp[4] = {0};
-
-		pglGetIntegerv( GL_VIEWPORT, vp );
-
-		if( !logged )
-		{
-			GLint box[4] = {0};
-			logged = true;
-			pglGetIntegerv( GL_SCISSOR_BOX, box );
-			vr_note( VR_SEV_INFO, "painel: GL do engine (viewport %d %d %d %d, scissor %d %d %d %d, FBO %d) - scissor off, desenho na janela (FBO 0)\n",
-				vp[0], vp[1], vp[2], vp[3], box[0], box[1], box[2], box[3], ( int )prev_draw );
-		}
-
-		// O 2D tem que chegar com a JANELA ligada (FBO 0): com r_scene_scale 1 e
-		// msaa 0 não existe render target interno, e o binding herdado pode ser
-		// o do último olho — foi assim que o painel (e o HUD do jogo) apareciam
-		// no headset. Se isto aparecer no log, o alvo do 2D voltou a se perder.
-		if( prev_draw != 0 )
-		{
-			static double last_nz;
-			double t = vr_now();
-
-			if( t - last_nz > 5.0 )
-			{
-				last_nz = t;
-				vr_note( VR_SEV_WARN, "painel: o 2D chegou com FBO %d ligado (esperado 0 = janela com r_scene_scale 1/msaa 0)\n",
-					( int )prev_draw );
-			}
-		}
-	}
-
-	vrglMatrixMode( GL_PROJECTION );
-	vrglPushMatrix();
-	vrglLoadIdentity();
-	vrglOrtho( 0.0, ( GLdouble )W, ( GLdouble )H, 0.0, -1.0, 1.0 ); // y para baixo
-	vrglMatrixMode( GL_MODELVIEW );
-	vrglPushMatrix();
-	vrglLoadIdentity();
-
-	vrglDisable( GL_DEPTH_TEST );
-	vrglDisable( GL_CULL_FACE );
-	vrglDisable( GL_ALPHA_TEST );
-	vrglDisable( GL_FOG );
-	// o engine deixa scissor ligado do desenho 2D dele; sem desligar, o painel
-	// é recortado para a área do HUD e some do framebuffer
-	vrglDisable( GL_SCISSOR_TEST );
-	vrglEnable( GL_BLEND );
-	vrglBlendFunc( GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA );
-
-	{
-		float bg_h = y + n_linhas * chh + 20.0f;
-		float bg_w = x + VR_PANEL_COLS * cw + 12.0f;
-		panel_rect( 6.0f, 6.0f, bg_w, bg_h, COL_BG );
-	}
-
-	// --- cabeçalho ---
-	const char *estado =
-		xr_init_failed.load()  ? "INATIVO (sem runtime)" :
-		xr_setup_permanent     ? "INATIVO (setup falhou)" :
-		vr_active.load()       ? "ATIVO (estereo)" :
-		vr_ready.load()        ? "PRONTO (aguardando headset)" :
-		xr_init_started.load() ? "INICIANDO..." : "DESLIGADO";
-
-	char buf[512];
-	const int COLS = VR_PANEL_COLS;
-
-	panel_text( x, y, ( float )sc, "MOD VR - PAINEL DE DEBUG", COL_HDR, 40 );
-	{
-		// rodapé do cabeçalho alinhado à direita, dentro da largura do painel
-		const char *nota = "so na tela 2D (VR_DEBUG_PANEL=0 esconde)";
-		int n = ( int )strlen( nota );
-		if( n > COLS - 26 )
-			n = COLS - 26;
-		panel_text( x + ( COLS - n ) * cw, y, ( float )sc, nota, COL_DIM, n );
-	}
-	y += chh;
-
-	panel_rect( x, y + chh * 0.5f, x + COLS * cw, y + chh * 0.5f + ( sc > 1 ? 2.0f : 1.0f ), COL_LINE );
-	y += chh;
-
-	snprintf( buf, sizeof( buf ), "FPS %6.1f | frame %5.1f ms | frames %lu",
-		( double )vr_fps, ( double )vr_frame_ms, vr_frames );
-
-	if( vr_eye_count == 2 )
-		snprintf( buf + strlen( buf ), sizeof( buf ) - strlen( buf ),
-			" | olhos 2 (%dx%d, %d img)", vr_eye_w, vr_eye_h, vr_eye_images );
-
-	panel_text( x, y, ( float )sc, buf, COL_INFO, COLS );
-	y += chh;
-
-	snprintf( buf, sizeof( buf ), "VR  %s | poses %s | sessao %s",
-		estado, xr_views_ok.load() ? "ok" : "sem poses",
-		vr_session_state.load() < 0 ? "-" : vr_session_state_str( vr_session_state.load()));
-	panel_text( x, y, ( float )sc, buf, xr_init_failed.load() ? COL_WARN : COL_INFO, COLS );
-	y += chh;
-
-	snprintf( buf, sizeof( buf ), "INI runtime=%s | video=%s | init %s%.0f ms",
-		vr_runtime[0] ? vr_runtime : "n/a", vr_video_driver[0] ? vr_video_driver : "?",
-		vr_init_ms < 0.0 ? "(em curso) " : "", vr_init_ms < 0.0 ? 0.0 : vr_init_ms );
-	panel_text( x, y, ( float )sc, buf, COL_INFO, COLS );
-	y += chh;
-
-	// estéreo: o que o runtime manda por olho e o que o render usa. É a linha
-	// que denuncia IPD errado ou olho com fov espelhada sem tirar o headset.
-	{
-		const double ipd_mm = xr_views_ok.load()
-			? sqrt( pow( ( double )xr_views[1].pose.position.x - xr_views[0].pose.position.x, 2 )
-			      + pow( ( double )xr_views[1].pose.position.y - xr_views[0].pose.position.y, 2 )
-			      + pow( ( double )xr_views[1].pose.position.z - xr_views[0].pose.position.z, 2 )) * 1000.0
-			: 0.0;
-
-		if( ipd_mm > 0.1 )
-		{
-			const XrFovf &f0 = xr_views[0].fov;
-			const XrFovf &f1 = xr_views[1].fov;
-
-			snprintf( buf, sizeof( buf ), "ESTEREO ipd %.1f mm (%s) | fov esq L%.0f R%.0f dir L%.0f R%.0f",
-				ipd_mm, vr_ipd_base_src,
-				rad2deg( -f0.angleLeft ), rad2deg( f0.angleRight ),
-				rad2deg( -f1.angleLeft ), rad2deg( f1.angleRight ));
-			panel_text( x, y, ( float )sc, buf, COL_INFO, COLS );
-		}
-		else
-		{
-			panel_text( x, y, ( float )sc, "ESTEREO sem poses por olho (runtime nao expos)", COL_DIM, COLS );
-		}
-		y += chh;
-	}
-
-	// ajuste do IPD: a linha de estado é permanente (é o número que se lê para
-	// calibrar); a linha de instruções só aparece com o modo ligado, e aí em
-	// âmbar — com o modo ligado o teclado pertence a este bloco, não ao jogo.
-	{
-		vr_ipd_state( buf, sizeof( buf ));
-		panel_text( x, y, ( float )sc, buf, vr_ipd_delta != 0.0f ? COL_OK : COL_INFO, COLS );
-		y += chh;
-
-		if( vr_ipd_adj_on )
-		{
-			panel_text( x, y, ( float )sc,
-				"  AJUSTE LIGADO: - aprox, = afasta (1.0 mm) | , . fino (0.1 mm) | 0 zero | F9",
-				COL_WARN, COLS );
-			y += chh;
-		}
-		else
-		{
-			panel_text( x, y, ( float )sc,
-				"  F9 liga o ajuste fino do IPD pelo teclado (valor tambem no headset)",
-				COL_DIM, COLS );
-			y += chh;
-		}
-	}
-
-	// input VR (Fase 3): o perfil de interação é o que responde "o controle
-	// casou?" — se vier "(nenhum)", nenhum binding sugerido pegou e não há
-	// locomoção, mesmo com o estéreo perfeito.
-	{
-		snprintf( buf, sizeof( buf ), "INPUT %s | perfil %s / %s",
-			!in_valid ? ( xr_actionset == XR_NULL_HANDLE ? "sem action set" : "inativo" ) : "ok",
-			short_profile( in_profile[0] ), short_profile( in_profile[1] ));
-		panel_text( x, y, ( float )sc, buf, in_valid ? COL_INFO : COL_WARN, COLS );
-		y += chh;
-
-		snprintf( buf, sizeof( buf ), "  move %+.2f %+.2f | turn %+.2f | snap %.0f yaw %+.0f | botoes 0x%03X",
-			( double )in_move[0], ( double )in_move[1], ( double )in_turn[0],
-			( double )vr_snap_angle, ( double )vr_yaw_offset, vr_buttons_prev );
-		panel_text( x, y, ( float )sc, buf, COL_INFO, COLS );
-		y += chh;
-
-		snprintf( buf, sizeof( buf ), "  agacha %s | roomscale %s | maos %s %s",
-			vr_duck_phys ? "fisico" : ( in_crouch_btn ? "botao" : "-" ),
-			vr_roomscale ? "on" : "off",
-			in_hand_ok[0] ? "L" : "--", in_hand_ok[1] ? "R" : "--" );
-		panel_text( x, y, ( float )sc, buf, COL_INFO, COLS );
-		y += chh;
-
-		// arma na mão (Fase 6): é esta linha que permite calibrar o encaixe sem
-		// adivinhar (classe do modelo + offsets em uso, de mods/vr_weapon.cfg)
-		{
-			const float *tw = vr_wpn_active_offset();
-
-			snprintf( buf, sizeof( buf ), "  arma %s | mira %s | encaixe %+.0f %+.0f %+.0f %s",
-				vr_wpn_model, vr_aim_source_name(),
-				( double )tw[0], ( double )tw[1], ( double )tw[2],
-				vr_wpn.has_cls[vr_wpn_class] ? "(classe)" : "(global)" );
-			panel_text( x, y, ( float )sc, buf, COL_INFO, COLS );
-			y += chh;
-		}
-
-		// menus no VR (Fase 4): é por estas duas linhas que se confirma, sem
-		// tirar o headset, que o painel está sendo desenhado e para onde o
-		// laser aponta — e que o clique foi enviado
-		{
-			snprintf( buf, sizeof( buf ), "  menu %s | canvas tx %u %dx%d | ponteiro %s (%.0f, %.0f) | cliques %u",
-				vr_menu_open ? "ABERTO" : "fechado", vr_menu_canvas_tex, vr_menu_canvas_w,
-				vr_menu_canvas_h, vr_menu_hit ? "NO PAINEL" : "fora",
-				( double )vr_menu_ptr_x, ( double )vr_menu_ptr_y, vr_menu_clicks );
-			panel_text( x, y, ( float )sc, buf, vr_menu_open ? COL_OK : COL_DIM, COLS );
-			y += chh;
-
-			snprintf( buf, sizeof( buf ), "  painel dist %.2f m altura %.2f m (%s) | ancora %s | laser %s",
-				( double )vr_menu_dist_m, ( double )vr_menu_height_m,
-				vr_menu ? "on" : "OFF", vr_menu_anchor_ok ? "ok" : "pendente",
-				vr_menu_laser ? "on" : "off" );
-			panel_text( x, y, ( float )sc, buf, COL_DIM, COLS );
-			y += chh;
-		}
-	}
-
-	{
-		char hb[160];
-		vr_hands_status( hb, sizeof( hb ));
-		panel_text( x, y, ( float )sc, hb, vr_hands_ready() ? COL_OK : COL_DIM, COLS );
-		y += chh;
-	}
-
-	panel_rect( x, y + chh * 0.5f, x + COLS * cw, y + chh * 0.5f + ( sc > 1 ? 2.0f : 1.0f ), COL_LINE );
-	y += chh;
-
-	snprintf( buf, sizeof( buf ), "ERROS E AVISOS DO CARREGAMENTO  (%d erro(s), %d aviso(s), %lu evento(s))",
-		vr_msg_view_errors, vr_msg_view_warns, vr_msg_view_total );
-	panel_text( x, y, ( float )sc, buf, vr_msg_view_errors ? COL_ERR : COL_HDR, COLS );
-	y += chh;
-
-	// --- mensagens (mais antiga primeiro; as que não cabem saem do topo) ---
-	if( vr_msg_view_count == 0 )
-	{
-		panel_text( x, y, ( float )sc, "nenhum erro ou aviso registrado ate agora", COL_DIM, COLS );
-		y += chh;
-	}
-	else
-	{
-		if( omitidas > 0 )
-		{
-			snprintf( buf, sizeof( buf ), "-- %d mensagem(ns) anterior(es) omitida(s) (ver mods/mod_vr.log) --", omitidas );
-			panel_text( x, y, ( float )sc, buf, COL_DIM, COLS );
-			y += chh;
-		}
-
-		for( int i = first_msg; i < vr_msg_view_count; i++ )
-		{
-			const vr_msg_t &m = vr_msg_view[i];
-			char pre[32];
-
-			// colunas: 0..9 = "t    12.3s ", 10..12 = severidade, 13.. = texto
-			snprintf( pre, sizeof( pre ), "t%7.1fs ", m.t );
-			panel_text( x, y, ( float )sc, pre, COL_DIM, 10 );
-			panel_text( x + 10 * cw, y, ( float )sc, vr_sev_tag( m.sev ), vr_sev_color( m.sev ), 3 );
-			panel_text( x + 13 * cw, y, ( float )sc, m.text, vr_sev_color( m.sev ), COLS - 13 );
-			y += chh;
-		}
-	}
-
-	panel_rect( x, y + chh * 0.5f, x + COLS * cw, y + chh * 0.5f + ( sc > 1 ? 2.0f : 1.0f ), COL_LINE );
-	y += chh;
-
-	panel_text( x, y, ( float )sc, "log completo: mods/mod_vr.log", COL_DIM, COLS );
-
-	// dump de diagnóstico (uma vez, quando o 2D já tem conteúdo; VR_PANEL_DUMP_AT
-	// muda o atraso em segundos — útil para capturar já dentro de um mapa)
-	if( vr_panel_dump_path[0] && !vr_panel_dump_done && eng && ( eng->DoubleTime() - vr_t0 ) >= vr_panel_dump_at )
-		panel_dump( W, H );
-
-	vrglMatrixMode( GL_MODELVIEW );
-	vrglPopMatrix();
-	vrglMatrixMode( GL_PROJECTION );
-	vrglPopMatrix();
-	vrglPopAttrib();
-
-	// devolve os alvos que estavam ligados (o engine segue daqui para o R_EndFrame);
-	// read e draw separados, como faz o blit do espelho — não deixamos o read
-	// apontando para a janela por conta própria
-	pglBindFramebuffer( GL_DRAW_FRAMEBUFFER, ( GLuint )prev_draw );
-	pglBindFramebuffer( GL_READ_FRAMEBUFFER, ( GLuint )prev_read );
-}
-
-// Valor do ajuste DENTRO do headset. O painel de debug vive só na janela 2D, e
-// quem calibra estéreo está com o HMD na cabeça: sem isto, o número só seria
-// legível tirando o headset (e, na prática, se perderia a referência de qual
-// tecla produziu qual valor). O texto vai IDÊNTICO nos dois olhos — disparidade
-// zero, que funde num ponto só — e é desenhado na imagem do olho ANTES do
-// release, com o mesmo padrão de estado do vr_draw_vignette.
-static void vr_draw_ipd_hud( int eye )
-{
-	char linhas[3][192];
-	int W, H, sc, n = 0;
-	float cw, chh, x, y, wmax = 0.0f;
-	GLint prev_draw = 0, prev_read = 0;
-
-	if( !vr_ipd_hud || !vr_ipd_adj_on )
-		return;
-
-	if( eye < 0 || eye > 1 || xr_eye[eye].cur < 0 || xr_eye[eye].fbos.empty() || !vr_panel_gl_ok )
-		return;
-
-	W = xr_eye[eye].w;
-	H = xr_eye[eye].h;
-	if( W <= 0 || H <= 0 )
-		return;
-
-	// a fonte é 8x16: a escala sai da altura do olho (~1/32 dela por linha)
-	sc = H / ( 32 * VR_FONT_H );
-	if( sc < 1 ) sc = 1;
-
-	cw = VR_FONT_W * sc;
-	chh = VR_FONT_H * sc;
-
-	snprintf( linhas[n++], sizeof( linhas[0] ), "AJUSTE DO IPD (F9 sai)" );
-	vr_ipd_state( linhas[n++], sizeof( linhas[0] ));
-	snprintf( linhas[n++], sizeof( linhas[0] ), "- aprox / = afasta  1.0 mm    , . fino  0.1 mm    0 zera" );
-
-	for( int i = 0; i < n; i++ )
-	{
-		float w = ( float )strlen( linhas[i] ) * cw;
-
-		if( w > wmax )
-			wmax = w;
-	}
-
-	x = ( W - wmax ) * 0.5f;
-	y = H * 0.06f;
-
-	// fundo: texto claro sobre cena clara (céu, parede branca) não se lê
-	pglGetIntegerv( GL_DRAW_FRAMEBUFFER_BINDING, &prev_draw );
-	pglGetIntegerv( GL_READ_FRAMEBUFFER_BINDING, &prev_read );
-	pglBindFramebuffer( GL_FRAMEBUFFER, xr_eye[eye].fbos[xr_eye[eye].cur] );
-
-	vrglPushAttrib( GL_ALL_ATTRIB_BITS );
-	vrglMatrixMode( GL_PROJECTION ); vrglPushMatrix(); vrglLoadIdentity();
-	vrglOrtho( 0.0, ( GLdouble )W, ( GLdouble )H, 0.0, -1.0, 1.0 ); // y para baixo
-	vrglMatrixMode( GL_MODELVIEW ); vrglPushMatrix(); vrglLoadIdentity();
-	vrglDisable( GL_DEPTH_TEST );
-	vrglDisable( GL_CULL_FACE );
-	vrglDisable( GL_ALPHA_TEST );
-	vrglDisable( GL_FOG );
-	vrglDisable( GL_SCISSOR_TEST );
-	vrglEnable( GL_BLEND );
-	vrglBlendFunc( GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA );
-
-	panel_rect( x - 14.0f, y - 8.0f, x + wmax + 14.0f, y + n * chh + 8.0f, COL_BG );
-
-	for( int i = 0; i < n; i++ )
-	{
-		panel_text( x, y, ( float )sc, linhas[i], i == 0 ? COL_WARN : COL_HDR, 0 );
-		y += chh;
-	}
-
-	vrglMatrixMode( GL_PROJECTION ); vrglPopMatrix();
-	vrglMatrixMode( GL_MODELVIEW ); vrglPopMatrix();
-	vrglPopAttrib();
-
-	pglBindFramebuffer( GL_DRAW_FRAMEBUFFER, ( GLuint )prev_draw );
-	pglBindFramebuffer( GL_READ_FRAMEBUFFER, ( GLuint )prev_read );
-}
-
-static void VR_Overlay2D( void )
-{
-	double t0 = vr_now();
-
-	panel_draw();
-	vr_perf_panel_ms += ( vr_now() - t0 ) * 1000.0;
-
-	// dump de diagnóstico: independente de o painel estar VISÍVEL, senão não
-	// haveria como capturar a tela limpa (VR_DEBUG_PANEL=0) — e é justamente aí
-	// que se enxerga o que o painel tapava.
-	if( vr_panel_dump_path[0] && !vr_panel_dump_done && eng && ( eng->DoubleTime() - vr_t0 ) >= vr_panel_dump_at )
-	{
-		GLint vp[4] = { 0, 0, 0, 0 };
-
-		pglGetIntegerv( GL_VIEWPORT, vp );
-
-		if( vp[2] > 0 && vp[3] > 0 )
-			panel_dump( vp[2], vp[3] );
-	}
-}// ---------------- hooks da ABI ----------------
 // ---------------- viewmodel proprio (bracos + arma) ----------------
 // O subsistema vive em vr_hands.cpp e nao depende da ABI: recebe o que o mod ja
 // sabe (poses das maos, corpo) e devolve o estado. Aqui so ligamos/desligamos.
@@ -3649,6 +1423,7 @@ static void vr_hands_cam( vr_hands_cam_t *out, const vr_eye_cam_t &c )
 static int VR_Init( const mod_engine_api_t *e )
 {
 	eng = e;
+	vr_paths_init(e->services);
 	vr_t0 = e->DoubleTime();
 	verbose = env_on( "VR_DEBUG" );
 	vr_trace_all = env_on( "VR_TRACE" ); // rastreio do pipeline estéreo sem parar
@@ -3861,66 +1636,65 @@ static int VR_Init( const mod_engine_api_t *e )
 	}
 
 	xr_init_started = true;
-	std::thread( xr_init_thread ).detach();
+	vr_async_start(xr_init_thread);
 
-	// espera curta pela INSTÂNCIA (é o xrCreateInstance do WiVRn que bloqueia
-	// sem headset). A sessão é criada depois, na main thread, de 1 em 1 s.
-	for( int i = 0; i < 60 && !xr_init_done; i++ )
-		std::this_thread::sleep_for( std::chrono::milliseconds( 100 ));
-
-	if( !xr_init_done )
-	{
-		vr_note( VR_SEV_WARN, "runtime demorando (headset off?) - flat; VR liga ao conectar\n" );
-		return 1;
-	}
-
-	if( xr_init_failed )
-	{
-		vr_init_ms = ( e->DoubleTime() - vr_t0 ) * 1000.0;
-		vr_note( VR_SEV_WARN, "sem runtime OpenXR (%.0f ms): jogo segue flat\n", vr_init_ms );
-		return 1;
-	}
-
-	vr_note( VR_SEV_OK, "instancia OpenXR criada em %.0f ms; montando a sessao na main thread\n",
-		( e->DoubleTime() - vr_t0 ) * 1000.0 );
+	vr_note(VR_SEV_INFO,"OpenXR iniciando em segundo plano; jogo flat continua responsivo\n");
 
 	return 1;
 }
 
+static void VR_StopSession()
+{
+    if(xr_session!=XR_NULL_HANDLE) {
+        xr_end_frame();
+        if(xr_session_begun) xrRequestExitSession(xr_session);
+        for(int h=0;h<2;h++)if(xr_aim_space[h]!=XR_NULL_HANDLE){xrDestroySpace(xr_aim_space[h]);xr_aim_space[h]=XR_NULL_HANDLE;}
+        if(xr_space!=XR_NULL_HANDLE){xrDestroySpace(xr_space);xr_space=XR_NULL_HANDLE;}
+        for(auto& eye:xr_eye){
+            if(!eye.fbos.empty())pglDeleteFramebuffers((GLsizei)eye.fbos.size(),eye.fbos.data());
+            if(eye.depth)pglDeleteRenderbuffers(1,&eye.depth);
+            if(eye.sc!=XR_NULL_HANDLE)xrDestroySwapchain(eye.sc);
+            eye=EyeRT{};
+        }
+        xrDestroySession(xr_session);xr_session=XR_NULL_HANDLE;
+    }
+    if(xr_actionset!=XR_NULL_HANDLE){xrDestroyActionSet(xr_actionset);xr_actionset=XR_NULL_HANDLE;}
+    vr_active=false;vr_ready=false;in_valid=false;xr_views_ok=false;vr_buttons_prev=0;
+    xr_session_begun=false;xr_frame_began=false;vr_session_state=-1;
+    xr_setup_next_t=0;xr_setup_permanent=false;xr_setup_last_err=0x7fffffff;
+}
+
 static void VR_Shutdown( void )
 {
-	char ipd[192];
+    VR_StopSession();vr_hands_shutdown();vr_async_finish();
+    if(!vr_async_done()) { vr_note(VR_SEV_INFO,"OpenXR ainda iniciando: biblioteca permanece carregada até sair\n"); return; }
+    if(xr_instance!=XR_NULL_HANDLE){xrDestroyInstance(xr_instance);xr_instance=XR_NULL_HANDLE;}
+    vr_note(VR_SEV_INFO,"VR encerrado\n");
+}
 
-	// o valor do IPD sai SEMPRE, inclusive quando o VR nem ligou: é o número que
-	// o dono precisa ler depois de calibrar (o painel 2D já não existe aqui)
-	vr_ipd_state( ipd, sizeof( ipd ));
-	vr_note( VR_SEV_INFO, "shutdown: %s\n", ipd );
+static int VR_Enable(int enabled)
+{
+    if(!enabled){
+        VR_StopSession();
+        vr_note(VR_SEV_INFO,"VR desativado: câmera, ponteiro e entrada devolvidos ao jogo\n");
+    }else{
+        if(xr_init_failed&&vr_async_done()){
+            vr_async_finish();xr_init_done=false;xr_init_failed=false;xr_instance_ready=false;
+            vr_async_start(xr_init_thread);
+        }
+        vr_note(VR_SEV_INFO,"VR ativado; aguardando runtime e rastreio quando necessário\n");
+    }
+    return 1;
+}
 
-	vr_note( VR_SEV_INFO, "shutdown (frames=%lu, fps medio final %.1f)\n", vr_frames, vr_fps );
-	if( !xr_init_done )
-	{
-		if( xr_init_started )
-			vr_note( VR_SEV_INFO, "init ainda em andamento - abortando sem destruir sessao\n" );
-		else
-			vr_note( VR_SEV_INFO, "init do OpenXR nunca comecou (mod inativo)\n" );
-		return;
-	}
-	if( xr_session != XR_NULL_HANDLE )
-	{
-		// xrEndSession só é aceito no estado STOPPING (o WiVRn/Monado devolve
-		// XR_ERROR_SESSION_NOT_STOPPING fora dele); fora disso o runtime
-		// derruba a sessão sozinho quando o processo cliente desaparece.
-		if( vr_session_state.load() == XR_SESSION_STATE_STOPPING )
-		{
-			xr_end_frame();
-			xrEndSession( xr_session );
-		}
-		else
-		{
-			vr_note( VR_SEV_INFO, "encerrando sem xrEndSession (estado %s): o runtime limpa a sessao\n",
-				vr_session_state.load() < 0 ? "-" : vr_session_state_str( vr_session_state.load()));
-		}
-	}
+static void VR_DebugPanel(const csmod_ui_t *ui)
+{
+    char line[256];
+    if(xr_init_failed)ui->Text("OpenXR indisponível: o jogo continua flat. Desative e ative para tentar novamente.");
+    snprintf(line,sizeof(line),"Runtime: %s · sessão: %s",xr_init_done?vr_runtime:"iniciando",vr_session_state_str(vr_session_state.load()));ui->Text(line);
+    snprintf(line,sizeof(line),"%.1f FPS · %.2f ms/frame · olhos %dx%d",(double)vr_fps,(double)vr_frame_ms,vr_eye_w,vr_eye_h);ui->Text(line);
+    vr_ipd_state(line,sizeof(line));ui->Text(line);
+    ui->Text("F9: calibração do IPD. A visibilidade deste painel não ativa o VR.");
 }
 
 static void VR_FramePre( double time )
@@ -3950,7 +1724,7 @@ static void VR_FramePre( double time )
 		}
 	}
 
-	vr_msgs_refresh(); // instantâneo do log p/ o painel deste frame
+
 	vr_wpn_cfg_tick(); // encaixe da arma: relê mods/vr_weapon.cfg se ele mudou
 	vr_hands_tick();   // viewmodel próprio: relê mods/vr_hands.cfg se ele mudou
 	vr_ipd_cfg_tick(); // ajuste do IPD: relê mods/vr_ipd.cfg se ele mudou
@@ -4501,7 +2275,7 @@ static double vr_menu_cfg_next_t;
 // escreve o template SÓ se o arquivo não existir (nunca sobrescreve calibração)
 static void vr_menu_cfg_seed( void )
 {
-	FILE *f = fopen( "mods/vr_menu.cfg", "r" );
+	FILE *f = fopen( vr_config_path("vr_menu.cfg"), "r" );
 
 	if( f )
 	{
@@ -4509,7 +2283,7 @@ static void vr_menu_cfg_seed( void )
 		return;
 	}
 
-	f = fopen( "mods/vr_menu.cfg", "w" );
+	f = fopen( vr_config_path("vr_menu.cfg"), "w" );
 
 	if( !f )
 		return;
@@ -4536,9 +2310,9 @@ static void vr_menu_cfg_load( void )
 	struct stat st;
 	char line[256];
 	bool any = false;
-	FILE *f = fopen( "mods/vr_menu.cfg", "r" );
+	FILE *f = fopen( vr_config_path("vr_menu.cfg"), "r" );
 
-	if( stat( "mods/vr_menu.cfg", &st ) == 0 )
+	if( stat( vr_config_path("vr_menu.cfg"), &st ) == 0 )
 		vr_menu_cfg_mtime = ( double )st.st_mtime;
 
 	if( !f )
@@ -4607,7 +2381,7 @@ static void vr_menu_cfg_tick( void )
 
 	vr_menu_cfg_next_t = now + 1.0;
 
-	if( stat( "mods/vr_menu.cfg", &st ) != 0 )
+	if( stat( vr_config_path("vr_menu.cfg"), &st ) != 0 )
 		return;
 
 	if(( double )st.st_mtime != vr_menu_cfg_mtime )
@@ -5377,9 +3151,13 @@ static mod_api_t g_api =
 	.Mod_Overlay2D = VR_Overlay2D,
 	.Mod_ViewModel = VR_ViewModel,
 	.Mod_Key = vr_ipd_key,
+	.size = sizeof(mod_api_t),
+	.Mod_Enable = VR_Enable,
+	.Mod_DebugPanel = VR_DebugPanel,
+	.Mod_WorldOverlay = NULL,
 };
 
-extern "C" mod_api_t *ModGetAPI( void )
+extern "C" __attribute__((visibility("default"))) mod_api_t *ModGetAPI( void )
 {
 	return &g_api;
 }

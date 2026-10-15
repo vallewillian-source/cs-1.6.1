@@ -35,6 +35,7 @@
 //  * Convencao de eixos: tudo em unidades/eixos GoldSrc (Z para cima, 1 unidade ~
 //    1 polegada, 39,37 por metro). glTF/OBJ vem do autor: convertidos por cfg.
 #include "vr_hands.h"
+#include "vr_paths.h"
 
 #include <math.h>
 #include <stdarg.h>
@@ -56,7 +57,10 @@
 #pragma GCC diagnostic ignored "-Wall"
 #pragma GCC diagnostic ignored "-Wextra"
 #include "third_party/cgltf.h"
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wunused-function"
 #include "third_party/stb_image.h"
+#pragma GCC diagnostic pop
 #pragma GCC diagnostic pop
 
 // ---------------------------------------------------------------- log ------
@@ -545,6 +549,7 @@ typedef struct
 	float holster_euler[3];
 	float holster_radius, grab_radius, grab_hyst;
 	float two_hand_radius, two_hand_blend;
+	float wrist_roll;        // 0 = roll do punho vem do braco (natural); 1 = do controle
 	float drop_gravity, drop_eye_height;
 	float recoil_deg, recoil_kick, recoil_interval;
 	bool  enforce_armed;     // fora da mao o gatilho nao atira (so na classe coberta)
@@ -591,6 +596,11 @@ static void cfg_defaults( void )
 	cfg.holster_euler[0] = -70.0f; cfg.holster_euler[1] = 0.0f; cfg.holster_euler[2] = 0.0f;
 	cfg.holster_radius = 9.0f; cfg.grab_radius = 7.0f; cfg.grab_hyst = 1.7f;
 	cfg.two_hand_radius = 6.0f; cfg.two_hand_blend = 0.5f;
+	cfg.wrist_roll = 1.0f;   // roll do punho: o do CONTROLE (o jogador segura o controle de
+	                         // cabo em pe, entao a arma sai em pe) — o referencial de
+	                         // empunhadura e que estava 90 graus torto, ver palm_from_rest.
+	                         // 0 = roll vindo do braco (o repouso do rig tem a palma para
+	                         // cima, o que deita a arma): so como alternativa.
 	cfg.drop_gravity = 386.0f; cfg.drop_eye_height = 28.0f;
 	cfg.recoil_deg = 7.0f; cfg.recoil_kick = 0.9f; cfg.recoil_interval = 0.09f;
 	cfg.enforce_armed = true;   // com a arma no coldre/chao, o gatilho nao atira
@@ -665,6 +675,7 @@ static void cfg_parse( const char *path )
 		else if( !strcmp( key, "grab_hyst" ))      cfg.grab_hyst = ( float )atof( val );
 		else if( !strcmp( key, "two_hand_radius" )) cfg.two_hand_radius = ( float )atof( val );
 		else if( !strcmp( key, "two_hand_blend" )) cfg.two_hand_blend = ( float )atof( val );
+		else if( !strcmp( key, "wrist_roll" ))    cfg.wrist_roll = ( float )atof( val );
 		else if( !strcmp( key, "drop_gravity" ))   cfg.drop_gravity = ( float )atof( val );
 		else if( !strcmp( key, "drop_eye_height" )) cfg.drop_eye_height = ( float )atof( val );
 		else if( !strcmp( key, "recoil_deg" ))     cfg.recoil_deg = ( float )atof( val );
@@ -762,11 +773,17 @@ static void joint_world( hmesh_t *m, int idx, m4 out )
 	else memcpy( out, m->joint[idx].local, sizeof( m4 ));
 }
 
-// Referencia da PALMA de cada mao, medida no repouso do rig (espaco do rig):
-//  * frente = punho -> media das bases dos tres dedos longos (para onde o dedo aponta)
-//  * normal = cross(frente, pinky-index); o sinal e escolhido para apontar para o
-//    CENTRO do rig (a palma de uma mao em posicao natural olha para o corpo) — assim
-//    a mesma formula vale para as duas maos, sem hardcode de lado.
+// Referencial de EMPUNHADURA de cada mao, medido no repouso do rig (espaco do rig):
+//  * frente (X) = punho -> media das bases dos dedos longos (para onde a mao aponta; e
+//    a direcao em que o cano de uma arma empunhada corre)
+//  * cima (Z) = LINHA DOS NOS, do mindinho para o indicador (que continua ate o
+//    polegar). E o eixo do CABO numa empunhadura — o beavertail de uma pistola fica
+//    entre o polegar e o indicador e o carregador sai no mindinho — e o mesmo eixo que
+//    um controle de cabo (Touch) reporta como "cima".
+//  * esquerda (Y) = cross(cima, frente), o que mantem o referencial destro e da a
+//    direcao em que a palma olha (e o "esquerda" que o controle reporta).
+// A normal da palma (com o sinal escolhido para o centro do rig) fica so como
+// conferencia de polaridade no log: quem manda no referencial e a anatomia acima.
 //  * centro = 55% do caminho punho -> dedos (onde o cabo da arma se apoia).
 static void palm_from_rest( hmesh_t *m )
 {
@@ -774,8 +791,9 @@ static void palm_from_rest( hmesh_t *m )
 	{
 		m4 Ww;
 		float wrist[3], mean1[3] = {0,0,0}, s[3] = {0,0,0};
+		float ipos[3] = {0,0,0}, ppos[3] = {0,0,0}, tpos[3] = {0,0,0};
 		int n1 = 0, nlong = 0;
-		bool have_index = false, have_pinky = false;
+		bool have_index = false, have_pinky = false, have_thumb = false;
 
 		if( m->j_wrist[h] < 0 ) continue;
 		joint_world( m, m->j_wrist[h], Ww );
@@ -793,8 +811,9 @@ static void palm_from_rest( hmesh_t *m )
 				for( int c = 0; c < 3; c++ ) mean1[c] += W[12+c];
 				nlong++;
 			}
-			if( f == 3 ) { for( int c = 0; c < 3; c++ ) s[c] = W[12+c]; have_index = true; }        // index
-			if( f == 0 ) { for( int c = 0; c < 3; c++ ) s[c] -= W[12+c]; have_pinky = true; }       // menos pinky
+			if( f == 3 ) { for( int c = 0; c < 3; c++ ) { s[c] = W[12+c]; ipos[c] = W[12+c]; } have_index = true; }   // index
+			if( f == 0 ) { for( int c = 0; c < 3; c++ ) { s[c] -= W[12+c]; ppos[c] = W[12+c]; } have_pinky = true; } // menos pinky
+			if( f == 4 ) { for( int c = 0; c < 3; c++ ) tpos[c] = W[12+c]; have_thumb = true; }                        // polegar
 			n1++;
 		}
 		if( n1 < 3 || nlong < 1 || !have_index || !have_pinky ) continue;
@@ -814,10 +833,44 @@ static void palm_from_rest( hmesh_t *m )
 		float to_center[3] = { -wrist[0], -wrist[1], -wrist[2] };
 		if( v3_dot( nrm, to_center ) < 0.0f ) { nrm[0]=-nrm[0]; nrm[1]=-nrm[1]; nrm[2]=-nrm[2]; }
 
+		// ---- eixo "CIMA" da mao (e da arma, que e montada na mao): a LINHA DOS NOS ----
+		// A direcao do dedo minimo para o indicador (que continua ate o polegar) e o eixo
+		// que aponta para CIMA quando a mao EMPUNHA:
+		//  * numa pistola o beavertail fica entre o polegar e o indicador e o carregador
+		//    sai no mindinho: o cabo corre ao longo da linha dos nos e a alca (o "cima" da
+		//    arma) fica do lado do polegar;
+		//  * e o mesmo eixo que o controle entrega como "cima" quando o jogador segura um
+		//    controle de CABO (Touch: +Y sai da face de cima, onde esta o polegar).
+		// Antes o "cima" era a NORMAL da palma (as costas da mao), o que poe a linha dos nos
+		// na HORIZONTAL: o punho aparece girado ~90 graus ("girei meu pulso para a direita")
+		// e a arma, montada com o "cima" no eixo da mao, sai DEITADA e de cabeca para baixo,
+		// com o cabo apontando para FORA da palma em vez de dentro do punho. Um erro de 90
+		// graus no referencial explica os tres relatos (o punho torto, a arma invertida e o
+		// cabo fora do lugar).
+		float up[3] = { -s[0], -s[1], -s[2] };   // `s` = index - pinky: o polegar esta no -s
+		{
+			float proj = v3_dot( up, fwd );
+			for( int c = 0; c < 3; c++ ) up[c] -= fwd[c]*proj;      // perpendicular a frente
+			v3_norm( up );
+		}
+		// O eixo tem de apontar para o POLEGAR (e nao para o mindinho). Um sinal trocado
+		// aqui deita a arma, entao ele e conferido contra a anatomia do proprio rig no log.
+		float th_side = 0.0f;
+		if( have_thumb )
+		{
+			float mid[3], td[3];
+			for( int c = 0; c < 3; c++ ) mid[c] = 0.5f*( ipos[c] + ppos[c] );
+			for( int c = 0; c < 3; c++ ) td[c] = tpos[c] - mid[c];
+			float proj = v3_dot( td, fwd );
+			for( int c = 0; c < 3; c++ ) td[c] -= fwd[c]*proj;
+			v3_norm( td );
+			th_side = v3_dot( td, up );
+		}
+
 		for( int c = 0; c < 3; c++ )
 		{
 			m->palm_fwd[h][c] = fwd[c];
-			m->palm_up[h][c]  = -nrm[c];                     // costas da mao
+			m->palm_up[h][c]  = up[c];                       // linha dos nos, lado do polegar
 			// CENTRO DA PALMA **relativo ao punho**. Guardar a posicao ABSOLUTA do rig
 			// (`wrist + fwd*0.55d`, ~6 un. do centro do corpo) parecia inofensivo, mas o
 			// referencial da mao tem ORIGEM no punho: com um ponto absoluto ali, a arma
@@ -829,10 +882,16 @@ static void palm_from_rest( hmesh_t *m )
 		m->palm_off[h] = 0.55f * d;
 		m->palm_ok[h] = true;
 
-		vlog( "maos: palma %s centro a %.2f (rig) da munheca | frente(%.2f %.2f %.2f) normal(%.2f %.2f %.2f)\n",
+		// `polegar` = o eixo "cima" esta do lado do polegar (TEM de ser positivo: o sinal
+		// e conferido contra a anatomia do rig, e nao deduzido). `palma x lateral` (em
+		// modulo) = a normal da palma cai no eixo lateral do referencial, o que confirma
+		// que o referencial esta em volta do cabo. A POLARIDADE da normal nao e confiavel
+		// (o sinal escolhido pelo "centro do rig" saiu trocado de uma mao para a outra),
+		// por isso ela nao define mais nada aqui.
+		vlog( "maos: palma %s centro a %.2f (rig) da munheca | frente(%.2f %.2f %.2f) | cima=linha-dos-nos: polegar %+.2f (tem de ser +) | palma x lateral |%.2f|\n",
 			h ? "dir" : "esq", ( double )m->palm_off[h],
 			( double )fwd[0], ( double )fwd[1], ( double )fwd[2],
-			( double )nrm[0], ( double )nrm[1], ( double )nrm[2] );
+			( double )th_side, ( double )fabsf( v3_dot( nrm, m->palm_left[h] )));
 	}
 }
 
@@ -1010,7 +1069,7 @@ static bool load_obj( hmesh_t *m, const char *objpath, const char *mtlpath )
 				if( !strncmp( line, "newmtl ", 7 ) && nmats < 32 )
 				{
 					cur = &mats[nmats++];
-					snprintf( cur->name, sizeof( cur->name ), "%63s", line + 7 );
+					snprintf( cur->name, sizeof( cur->name ), "%.63s", line + 7 );
 					char *nl = strpbrk( cur->name, "\r\n" ); if( nl ) *nl = 0;
 					cur->kd[0]=cur->kd[1]=cur->kd[2]=0.5f;
 				}
@@ -1052,7 +1111,7 @@ static bool load_obj( hmesh_t *m, const char *objpath, const char *mtlpath )
 		}
 		else if( !strncmp( line, "usemtl ", 7 ))
 		{
-			char nm[64]; snprintf( nm, sizeof( nm ), "%63s", line+7 );
+			char nm[64]; snprintf( nm, sizeof( nm ), "%.63s", line+7 );
 			char *nl = strpbrk( nm, "\r\n" ); if( nl ) *nl = 0;
 			curkd[0]=curkd[1]=curkd[2]=0.6f;
 			for( int i = 0; i < nmats; i++ )
@@ -1285,6 +1344,7 @@ typedef struct
 	float arm_target[2];       // distancia ombro->alvo, CRUA (antes do clamp)
 	float arm_reach[2];        // alcance da cadeia (biceps+antebraco) no repouso
 	float elbow_deg[2];        // quanto o cotovelo dobra: 0 = esticado, 90+ = dobrado
+	float wrist_twist[2];      // torcao que o CONTROLE pedia no punho, graus (0 = concorda com o repouso)
 	float focus[3];            // onde a folha de contato deve enquadrar
 } hscene_t;
 
@@ -1328,6 +1388,7 @@ typedef struct
 	int    state;
 	int    rear;              // mao de tras (quem segura o cabo)
 	bool   two_hand;
+	bool   held;              // "alguem esta segurando" (borda de soltar; ver weapon_step)
 	bool   grip_prev[2];
 	float  ground[3];         // posicao da arma largada
 	float  ground_fwd[3];     // orientacao da arma largada (eixo do cano)
@@ -1356,6 +1417,20 @@ static void weapon_step( const vr_hands_body_t *body, const vr_hands_in_t *in,
 	bool grip[2] = { in->grip[0] > cfg.grip_th, in->grip[1] > cfg.grip_th };
 	bool edge[2] = { grip[0] && !g_ws.grip_prev[0], grip[1] && !g_ws.grip_prev[1] };
 	if( dt > 0.25f ) dt = 0.25f;   // o jogo travou: nao deixa a arma cair um andar
+
+	// em que estado a arma NASCE (tem de ser na mao). Se o log disser outra coisa
+	// logo no inicio, alguma coisa a largou antes de o jogador ve-la — foi assim que
+	// se apresentou o "nenhuma arma aparece, nem na mao nem no coldre".
+	{
+		static bool born = false;
+		if( !born )
+		{
+			born = true;
+			vlog( "maos: arma nasce %s (estado inicial) | grip esq %.2f dir %.2f (limiar %.2f)\n",
+				g_ws.state == VR_WS_HAND ? "NA MAO" : ( g_ws.state == VR_WS_HOLSTER ? "no coldre" : "no chao" ),
+				( double )in->grip[0], ( double )in->grip[1], ( double )cfg.grip_th );
+		}
+	}
 
 	// distancia de cada mao ate o "ponto de pega" do estado corrente
 	float anchor[3];
@@ -1401,10 +1476,17 @@ static void weapon_step( const vr_hands_body_t *body, const vr_hands_in_t *in,
 			if( H[1-g_ws.rear].ok && sqrtf( v3_dot( d, d )) <= cfg.two_hand_radius )
 				g_ws.two_hand = true;
 		}
-		// solta quando NINGUEM mais segura: de duas maos, largar so a de tras nao
-		// derruba a arma (a de apoio ja a segura)
-		if( g_ws.two_hand ? !( grip[0] || grip[1] ) : !grip[g_ws.rear] )
-			release();
+		// SOLTA na BORDA do "alguem esta segurando" (`held`), nao em "grip em 0":
+		// no 1o frame ninguem apertou ainda e a arma era largada no chao antes de o
+		// jogador ve-la ("nenhuma arma aparece, nem na mao nem no coldre"). Pegar ja
+		// exigia borda; largar tambem. De duas maos, largar so a de tras nao derruba
+		// (a de apoio ainda segura): `held` e a UNIAO das maos que seguram, e nao a
+		// mao de tras — se fosse por mao, a de apoio assumir a arma nao contaria.
+		{
+			bool held = g_ws.two_hand ? ( grip[0] || grip[1] ) : grip[g_ws.rear];
+			if( g_ws.held && !held ) release();
+			g_ws.held = held;
+		}
 	}
 	else
 	{
@@ -1419,6 +1501,7 @@ static void weapon_step( const vr_hands_body_t *body, const vr_hands_in_t *in,
 				int from = g_ws.state;
 				g_ws.state = VR_WS_HAND;
 				g_ws.rear = h;
+				g_ws.held = true;   // a mao que pega esta apertando (a borda de soltar parte daqui)
 				vlog( "maos: peguei a arma com a mao %s (%s)\n", h ? "direita" : "esquerda",
 					( from == VR_WS_GROUND ) ? "do chao" : "do coldre" );
 				break;
@@ -1520,27 +1603,30 @@ static void frame_build( hscene_t *s, const vr_hands_body_t *body, const vr_hand
 	for( int i = 0; i < g_arms.njoint; i++ ) memcpy( cur[i], g_arms.joint[i].local, sizeof( m4 ));
 	m4_mul( cur[g_arms.j_root], Marm, g_arms.rest_world[g_arms.j_root] );
 
-	// ---- 3) rotacao da mao a partir do controle: mapa palma(repouso) -> controle ----
+	// ---- 3) para ONDE a mao aponta: a frente do controle. E a UNICA coisa do
+	// controle que manda na rotacao da mao — o ROLL vem do braco (passo 6) ----
 	int st = ( force_state >= 0 ) ? force_state : g_ws.state;
 	int rear = g_ws.rear;
 	if( rear < 0 || rear > 1 ) rear = 1;
 	const float zero[3] = { 0.0f, 0.0f, 0.0f };
 
-	m4 Rw[2];
+	// referencial de repouso da palma transposto (palma -> rig) de cada mao, e a
+	// direcao que a mao deve apontar
+	m4 BrT[2];
+	float aim_dir[2][3];
 	for( int h = 0; h < 2; h++ )
 	{
-		float left[3] = { -H[h].rgt[0], -H[h].rgt[1], -H[h].rgt[2] };
-		m4 Bc, Br, BrT;
-		m4_from_axes( Bc, H[h].fwd, left, H[h].up, zero );
+		m4 Br;
 		m4_from_axes( Br, g_arms.palm_fwd[h], g_arms.palm_left[h], g_arms.palm_up[h], zero );
-		m4_rot_transpose( BrT, Br );
-		m4_mul( Rw[h], Bc, BrT );
+		m4_rot_transpose( BrT[h], Br );
+		memcpy( aim_dir[h], H[h].fwd, sizeof( aim_dir[h] ));
 	}
 
 	// DUAS MAOS: o cano vai da mao de tras para a de apoio (a de apoio esta a
 	// frente), misturado com a frente da propria mao de tras. A correcao entra AQUI,
-	// antes do IK: assim a mao de tras gira JUNTO com a arma (senao o cano sairia
-	// torto em relacao a propria mao que o segura).
+	// na DIRECAO e antes do IK: assim a mao de tras gira JUNTO com a arma (senao o
+	// cano sairia torto em relacao a propria mao que o segura) — sem herdar o roll
+	// do controle, que agora vem do braco.
 	bool two = ( st == VR_WS_HAND ) && g_ws.two_hand && H[1-rear].ok;
 	if( two )
 	{
@@ -1553,10 +1639,7 @@ static void frame_build( hscene_t *s, const vr_hands_body_t *body, const vr_hand
 			float bl = cfg.two_hand_blend, mix[3];
 			for( int c = 0; c < 3; c++ ) mix[c] = H[rear].fwd[c]*( 1.0f-bl ) + aim2[c]*bl;
 			v3_norm( mix );
-			m4 Rc, t2;
-			rot_between( Rc, H[rear].fwd, mix );
-			m4_mul( t2, Rc, Rw[rear] );
-			memcpy( Rw[rear], t2, sizeof( m4 ));
+			memcpy( aim_dir[rear], mix, sizeof( mix ));
 		}
 	}
 
@@ -1574,6 +1657,7 @@ static void frame_build( hscene_t *s, const vr_hands_body_t *body, const vr_hand
 	float support_target[3] = { 0.0f, 0.0f, 0.0f };
 	bool ik_ok[2] = { false, false };
 	s->wrist_slip[0] = s->wrist_slip[1] = -1.0f;   // -1 = a IK nao resolveu esta mao
+	s->wrist_twist[0] = s->wrist_twist[1] = 0.0f;
 	for( int pass = 0; pass < 2; pass++ )
 	{
 		int h = pass ? 1 - rear : rear;
@@ -1663,10 +1747,61 @@ static void frame_build( hscene_t *s, const vr_hands_body_t *body, const vr_hand
 			m4_mul( cur[jf], iWb, Wf3 );
 		}
 
-		// ---- 6) mao: a rotacao do controle + a posicao que a IK alcancou ----
+		// ---- 6) mao: DIRECAO do controle + ROLL do braco + a posicao da IK ----
 		m4 Wwk;
 		cur_world( &g_arms, cur, jw, Wwk );
 		float wr[3] = { Wwk[12], Wwk[13], Wwk[14] };
+
+		// O punho NATURAL deste rig: o roll sai do antebraco que a IK acabou de
+		// resolver — `R(Wf3) . R(rest_world[jf])^T` leva o rig para o mundo com o
+		// punho no repouso. Antes a mao era `Bc . Br^T`, o que OBRIGAVA o referencial
+		// da palma a coincidir com o do controle: a diferenca entre "eixos do
+		// controle" e "punho natural do rig" virava TORCAO do punho na tela — igual
+		// nas duas maos (o mapa era o mesmo) e maior na direita, que ainda levava a
+		// mistura do cano de duas maos. O controle manda na DIRECAO; o roll vem do
+		// braco. `wrist_roll` devolve o roll do controle (1 = comportamento anterior).
+		m4 Wf3r, RjT, Rwnat, Bw, Rw;
+		memcpy( Wf3r, Wf3, sizeof( m4 ));
+		Wf3r[12] = Wf3r[13] = Wf3r[14] = 0.0f;   // so a rotacao (a escala do rig fica nela)
+		m4_rot_transpose( RjT, g_arms.rest_world[jf] );
+		m4_mul( Rwnat, Wf3r, RjT );
+
+		float nat_fwd[3], nat_up[3];
+		m4_xform_dir( Rwnat, g_arms.palm_fwd[h], nat_fwd ); v3_norm( nat_fwd );
+		m4_xform_dir( Rwnat, g_arms.palm_up[h],  nat_up );  v3_norm( nat_up );
+
+		// diagnostico: quanta torcao o CONTROLE pedia no punho (0 = o controle ja
+		// concorda com o punho natural do rig). E o numero do relato "punho girado".
+		{
+			float cx[3];
+			v3_cross( cx, nat_up, H[h].up );
+			float cs = sqrtf( v3_dot( cx, cx ));
+			float ang = atan2f( cs, v3_dot( nat_up, H[h].up )) * 180.0f / ( float )M_PI;
+			s->wrist_twist[h] = ( v3_dot( cx, aim_dir[h] ) < 0.0f ) ? -ang : ang;
+		}
+
+		// eixos da mao no mundo: frente = a direcao pedida, cima = o roll misturado
+		// (o de cima tem de sair perpendicular a frente: Gram-Schmidt)
+		float fw2[3], up2[3], lf2[3];
+		memcpy( fw2, aim_dir[h], sizeof( fw2 )); v3_norm( fw2 );
+		for( int c = 0; c < 3; c++ )
+			up2[c] = nat_up[c]*( 1.0f-cfg.wrist_roll ) + H[h].up[c]*cfg.wrist_roll;
+		float proj = v3_dot( up2, fw2 );
+		for( int c = 0; c < 3; c++ ) up2[c] -= fw2[c]*proj;
+		// o controle pode pedir uma direcao paralela ao "cima" natural e zerar o vetor
+		// acima (rota de NaN no v3_norm). O eixo do repouso e perpendicular a direcao e
+		// serve de reserva; os dois nao podem degenerar juntos (frente e cima sao
+		// perpendiculares no repouso).
+		if( v3_dot( up2, up2 ) < 1e-6f )
+		{
+			float tmp[3];
+			v3_cross( tmp, fw2, nat_fwd );
+			memcpy( up2, tmp, sizeof( up2 ));
+		}
+		v3_norm( up2 );
+		v3_cross( lf2, up2, fw2 );               // esquerda = cima x frente (como no resto)
+		m4_from_axes( Bw, fw2, lf2, up2, zero );
+		m4_mul( Rw, Bw, BrT[h] );
 
 		// A mao e o UNICO osso cujo mundo e escrito por fora da cadeia (o IK posiciona
 		// o antebraco; o controle decide a rotacao da mao). O mundo que se quer e
@@ -1679,7 +1814,7 @@ static void frame_build( hscene_t *s, const vr_hands_body_t *body, const vr_hand
 		// Sem ela, o skin do punho fica exatamente T(wr).S(s).Rw.T(-p_repouso) — roda a
 		// mao em torno do proprio punho e poe o punho onde o IK o pos.
 		m4 Ph, Rho, ip;
-		m4_place( Ph, Rw[h], wr, cfg.scale_arms );
+		m4_place( Ph, Rw, wr, cfg.scale_arms );
 		memcpy( Rho, g_arms.rest_world[jw], sizeof( m4 ));
 		Rho[12] = Rho[13] = Rho[14] = 0.0f;
 		m4_inv( ip, Wf3 );
@@ -1864,17 +1999,17 @@ void vr_hands_reload( void )
 	axes_from_spec( g_conv_arms, cfg.arms_axes );
 	axes_from_spec( g_conv_weapon, cfg.weapon_axes );
 
-	if( !load_gltf( &g_arms, cfg.arms_glb )) return;
+	if( !load_gltf( &g_arms, vr_asset_path(cfg.arms_glb) )) return;
 	if( g_arms.tex == 0 && cfg.arms_tex[0] )
 	{
 		unsigned char *b = NULL; int n = 0;
-		if( file_read( cfg.arms_tex, &b, &n )) { g_arms.tex = tex_from_memory( b, n ); free( b ); }
+		if( file_read( vr_asset_path(cfg.arms_tex), &b, &n )) { g_arms.tex = tex_from_memory( b, n ); free( b ); }
 	}
 	char mtl[168];
-	snprintf( mtl, sizeof( mtl ), "%s", cfg.weapon_obj );
+	snprintf( mtl, sizeof( mtl ), "%s", vr_asset_path(cfg.weapon_obj) );
 	char *dot = strrchr( mtl, '.' );
 	if( dot ) snprintf( dot, ( size_t )( mtl + sizeof( mtl ) - dot ), ".mtl" );
-	load_obj( &g_weapon, cfg.weapon_obj, mtl );
+	load_obj( &g_weapon, vr_asset_path(cfg.weapon_obj), mtl );
 
 	// escala da arma resolvida UMA vez: comprimento real alvo (cm) / medido do
 	// modelo. E o unico lugar de onde a escala sai (o desenho nao recalcula).
@@ -1899,7 +2034,7 @@ void vr_hands_reload( void )
 bool vr_hands_init( vr_hands_log_fn log )
 {
 	g_log = log;
-	cfg_parse( "mods/vr_hands.cfg" );
+	cfg_parse( vr_config_path("vr_hands.cfg") );
 	if( !gl_load()) return false;
 
 	g_ws.state = VR_WS_HAND;      // comeca com a arma na mao (ver docs/HANDS.md)
@@ -1922,11 +2057,11 @@ void vr_hands_shutdown( void )
 void vr_hands_tick( void )
 {
 	struct stat st;
-	if( stat( "mods/vr_hands.cfg", &st ) != 0 ) return;
+	if( stat( vr_config_path("vr_hands.cfg"), &st ) != 0 ) return;
 	if( ( double )st.st_mtime != cfg_mtime )
 	{
 		cfg_mtime = ( double )st.st_mtime;
-		cfg_parse( "mods/vr_hands.cfg" );
+		cfg_parse( vr_config_path("vr_hands.cfg") );
 		// releitura recarrega os assets: e o que faz "editar o cfg e ver o
 		// resultado" valer para eixos, ancoras, escala e o modo da folha, sem
 		// reiniciar o jogo (o custo e ler 450 KB do disco, 1x por edicao)
@@ -1942,9 +2077,18 @@ void vr_hands_update( const vr_hands_body_t *body, const vr_hands_in_t *in,
 	if( !g_ready || !body || !in ) return;
 
 	// maos sinteticas (sem headset / `synth_hands`): o grip tambem e sintetico, e
-	// vem do cfg — senao o grip em 0 soltaria a arma no 1o frame do diagnostico
+	// vem do cfg — senao o grip em 0 soltaria a arma no 1o frame do diagnostico.
+	// SO a mao de tras aperta: com as DUAS apertando, as duas maos sinteticas (3 un.
+	// de distancia) entravam no estado de duas maos e a mao DIREITA ganhava sozinha a
+	// mistura do cano — a folha mostrava um punho torto que nao existe no estado
+	// natural, com o dobro da torcao da esquerda.
 	vr_hands_in_t in2 = *in;
-	if( !hands || cfg.synth_hands ) in2.grip[0] = in2.grip[1] = cfg.synth_grip;
+	if( !hands || cfg.synth_hands )
+	{
+		const int r = ( g_ws.rear == 0 ) ? 0 : 1;
+		in2.grip[0] = ( r == 0 ) ? cfg.synth_grip : 0.0f;
+		in2.grip[1] = ( r == 1 ) ? cfg.synth_grip : 0.0f;
+	}
 
 	g_time += ( in2.dt > 0.0f && in2.dt < 0.5f ) ? in2.dt : 0.016;
 
@@ -2131,6 +2275,7 @@ void vr_hands_sheet( const vr_hands_cam_t *cam )
 	const int  walk_state0 = g_ws.state;
 	const int  walk_rear0 = g_ws.rear;
 	const bool walk_two0 = g_ws.two_hand;
+	const bool walk_held0 = g_ws.held;
 	const bool walk_prev0[2] = { g_ws.grip_prev[0], g_ws.grip_prev[1] };
 
 	for( int row = 0; row < rows; row++ )
@@ -2177,6 +2322,18 @@ void vr_hands_sheet( const vr_hands_cam_t *cam )
 				yaw = 60.0f; pitch = 5.0f;
 				// distancia maior: cabe o coldre na barriga E as maos livres acima
 				dist = ( row == 0 && col == 1 ) ? 70.0f : ( row == 0 ? 50.0f : 55.0f );
+				if( row == 0 && col == 1 )
+				{
+					// duas maos DE VERDADE: a de apoio vai a FRENTE da de tras, como
+					// quem segura uma pistola com as duas maos — nao ao lado. Com as
+					// duas lado a lado, o cano (mao de tras -> mao de apoio) apontava
+					// para o lado e a folha mostrava um punho torto que nao existe.
+					synth_hand_fill( &body, &Hcell[1], 1 );   // mao de tras: a direita
+					memcpy( &Hcell[0], &Hcell[1], sizeof( Hcell[0] ));
+					for( int c = 0; c < 3; c++ )
+						Hcell[0].pos[c] += body.fwd[c]*cfg.support_fwd - body.rgt[c]*cfg.support_side;
+					cell_hands = true;
+				}
 			}
 			else if( mode == VR_SHEET_WALK )
 			{
@@ -2207,11 +2364,11 @@ void vr_hands_sheet( const vr_hands_cam_t *cam )
 					for( int c = 0; c < 3; c++ ) pO[c] = g_ws.ground[c];
 					gr[0] = 1.0f;
 					break;
-				case 4:                                          // as duas maos (juntas)
+				case 4:                                          // as duas maos (empilhadas)
 					for( int c = 0; c < 3; c++ )
 					{
 						pR[c] = body.pos[c] + body.fwd[c]*20.0f - body.up[c]*9.0f;
-						pO[c] = body.pos[c] + body.fwd[c]*20.0f + body.rgt[c]*2.0f - body.up[c]*9.0f;
+						pO[c] = pR[c] + body.fwd[c]*2.0f - body.rgt[c]*1.4f;   // a de apoio A FRENTE
 					}
 					gr[0] = gr[1] = 1.0f;
 					break;
@@ -2219,7 +2376,7 @@ void vr_hands_sheet( const vr_hands_cam_t *cam )
 					for( int c = 0; c < 3; c++ )
 					{
 						pR[c] = body.pos[c] + body.fwd[c]*20.0f - body.up[c]*9.0f;
-						pO[c] = body.pos[c] + body.fwd[c]*20.0f + body.rgt[c]*2.0f - body.up[c]*9.0f;
+						pO[c] = pR[c] + body.fwd[c]*2.0f - body.rgt[c]*1.4f;
 					}
 					gr[g_ws.rear] = 0.0f; gr[1 - g_ws.rear] = 1.0f;
 					break;
@@ -2259,7 +2416,7 @@ void vr_hands_sheet( const vr_hands_cam_t *cam )
 
 			// estado forcado da celula (a maquina de estados nao roda aqui)
 			int prev_state = g_ws.state, prev_rear = g_ws.rear;
-			bool prev_two = g_ws.two_hand;
+			bool prev_two = g_ws.two_hand, prev_held = g_ws.held;
 			if( mode == VR_SHEET_WALK )
 			{
 				// o roteiro roda a maquina de verdade, com o grip do passo
@@ -2298,7 +2455,8 @@ void vr_hands_sheet( const vr_hands_cam_t *cam )
 			// verdade); nos outros modos a celula so empresta o estado e devolve
 			if( mode != VR_SHEET_WALK )
 			{
-				g_ws.state = prev_state; g_ws.rear = prev_rear; g_ws.two_hand = prev_two;
+				g_ws.state = prev_state; g_ws.rear = prev_rear;
+				g_ws.two_hand = prev_two; g_ws.held = prev_held;
 			}
 
 			if( !sc.skin ) continue;
@@ -2348,6 +2506,7 @@ void vr_hands_sheet( const vr_hands_cam_t *cam )
 		g_ws.rear = walk_rear0;
 		g_ws.grip_prev[0] = walk_prev0[0]; g_ws.grip_prev[1] = walk_prev0[1];
 		g_ws.two_hand = walk_two0;
+		g_ws.held = walk_held0;
 	}
 
 	if( g_draws < 2 )
@@ -2382,6 +2541,25 @@ void vr_hands_sheet( const vr_hands_cam_t *cam )
 				( double )one.arm_target[0], ( double )one.arm_target[1],
 				( double )one.arm_reach[0], ( double )one.arm_reach[1],
 				( double )one.elbow_deg[0], ( double )one.elbow_deg[1] );
+			// a torcao do punho: diferenca entre o roll que o CONTROLE reporta e o roll
+			// que o braco daria; qual dos dois entra e o `wrist_roll`
+			vlog( "maos: punho: controle x braco %+.0f/%+.0f graus (esq/dir) | wrist_roll %.2f -> entram %+.0f/%+.0f\n",
+				( double )one.wrist_twist[0], ( double )one.wrist_twist[1],
+				( double )cfg.wrist_roll,
+				( double )( one.wrist_twist[0] * cfg.wrist_roll ),
+				( double )( one.wrist_twist[1] * cfg.wrist_roll ));
+			// a ALCA da arma tem de olhar para cima: no diagnostico o "controle" e o
+			// corpo, entao a arma na mao tem de sair em pe (+1.00 na vertical do corpo,
+			// 0.00 na direita). Era este o numero que faltava quando a arma apareceu de
+			// cabeca para baixo: o encaixe (cano x frente) estava certo e a alca nao.
+			{
+				float gu[3];
+				m4_xform_dir( one.hand[1], ( const float[3] ){ 0, 0, 1 }, gu );
+				v3_norm( gu );
+				vlog( "maos: arma: alca (cima) x cima-do-corpo = %+.2f | x direita-do-corpo = %+.2f | x frente-do-corpo = %+.2f (tem de dar +1.00 / 0.00 / 0.00)\n",
+					( double )v3_dot( gu, body.up ), ( double )v3_dot( gu, body.rgt ),
+					( double )v3_dot( gu, body.fwd ));
+			}
 			scene_free( &one );
 		}
 

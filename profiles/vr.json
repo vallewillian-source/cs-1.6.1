@@ -1,0 +1,11 @@
+{
+  "map": "de_dust2",
+  "port": 27015,
+  "bots": 8,
+  "mods": {
+    "bots-jev": true,
+    "x-ray-debug": false,
+    "vr": true,
+    "null": false
+  }
+}

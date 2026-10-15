@@ -1,0 +1,21 @@
+{
+  "manifest_version": 1,
+  "id": "x-ray-debug",
+  "name": "X-ray debug",
+  "version": "1.0.0",
+  "client_abi": 9,
+  "server_abi": 1,
+  "components": {
+    "client": "client.so",
+    "server": "server.so"
+  },
+  "claims": [],
+  "defaults": {
+    "enabled": false,
+    "panel": true
+  },
+  "capabilities": [
+    "debug-panel",
+    "world-overlay"
+  ]
+}

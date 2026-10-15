@@ -41,5 +41,6 @@ __pycache__/
 .zcode/
 
 # Builds dos Mods (fontes ficam em mods/*/; binários vão para game/mods/)
-mods/null/*.so
-mods/vr/*.so
+mods/**/*.so
+/build/
+/.impeccable/

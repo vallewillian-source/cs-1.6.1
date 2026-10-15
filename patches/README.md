@@ -1,21 +1,15 @@
-# Patches — the upstream changes this project needs
+# Upstream integrations
 
-CS 1.6.1 is built **from source on top of four upstream projects**, and it modifies two of
-them. Those modifications are not vendored into this repository (`src/` is in
-`.gitignore` — it holds re-clonable checkouts), so they live here as patches that the build
-re-applies to a clean checkout.
+- `xash3d-fwgs-mod-abi/`: client ABI v9, generic multi-mod loader, rendering/input
+  extension points and SDL2/OpenGL debug-tool integration.
+- `regamedll-mod-host/`: generic server ABI v1, lifecycle/round/bot hooks and the
+  first-spawn equipment fix. Advisor policy is in `mods/bots-jev/`.
+- `regamedll-bot-advisor/`: compatibility apply entrypoint only.
 
-| Patch set | Upstream | What it adds |
-|---|---|---|
-| [`xash3d-fwgs-mod-abi/`](xash3d-fwgs-mod-abi/) | [FWGS/xash3d-fwgs](https://github.com/FWGS/xash3d-fwgs) | The external-**Mod** system: the `mod_api.h` contract, the loader, the per-eye render loop, the asymmetric frustum, the viewmodel and input hooks, the 2D menu canvas — everything the VR Mod needs from the engine |
-| [`regamedll-bot-advisor/`](regamedll-bot-advisor/) | [rehlds/ReGameDLL_CS](https://github.com/rehlds/ReGameDLL_CS) | The bot **advisor module** (`cs_bot_advisor`): the observe/plan/apply hooks that let the Jev brain drive bots without a fork of the bot AI |
+Run `python3 scripts/apply-patches.py` from the repository root. It validates the
+complete integration and copies canonical sources from `sdk/` and pinned
+`third_party/` dependencies. `python3 scripts/verify-patches.py` checks fresh
+upstream revisions and idempotence without changing working checkouts.
 
-The other two upstreams are used unmodified:
-
-- **ReHLDS** — the 32-bit dedicated server engine. Built as-is.
-- **CS16Client** — the game client. Built as-is: every client-side VR feature (barrel aim,
-  snap turn, roomscale crouch, controller input) is implemented through the engine's Mod
-  ABI, so the client DLL did not have to change.
-
-Each patch directory has its own README with the exact base revision and apply
-instructions. Applying them is part of [docs/BUILD.md](../docs/BUILD.md).
+ReHLDS and CS16Client remain unmodified. Source revisions and builds are documented
+in `docs/BUILD.md`.

@@ -2,8 +2,8 @@
 
 **An open-source Counter-Strike 1.6 distribution that is built to be modified.** The whole
 stack — engine, dedicated server, game DLL, client — is compiled from source and runs on
-Linux, and on top of it this project adds two things that stock CS 1.6 does not have: **a VR
-Mod** and **bots that think with a language model**.
+Linux, and on top of it this project adds independent, runtime-switchable **VR**, **Jev bots** and **x-ray debug** mods,
+with separate in-game diagnostic panels.
 
 The name is the point: this is a fork, not a re-release. A `1.6.1` that grows.
 
@@ -64,13 +64,13 @@ Stock CS bots are a state machine with a nav mesh. Here the bots get a **second 
 a sidecar process that observes the round as structured data, asks a language model (Jev)
 for intent, and writes that intent back for the game DLL to apply to its bots.
 
-- **Two brains, on purpose.** The fast half lives inside ReGameDLL as an *advisor* module:
-  it observes each round into a text file and applies a plan, but never runs a model and
+- **Two brains, on purpose.** The fast half is the package’s server component, loaded by the generic ReGameDLL host:
+  it publishes round snapshots and applies a plan, but never runs a model and
   never blocks a frame. The slow half is a Python sidecar that reads the observation, asks
   the model, and writes the plan back. The game keeps playing at full speed whether or not
   the brain is up.
 - **Bounded by design.** The model only chooses from a fixed vocabulary of intents
-  (`RUSH_B`, `HOLD_MID`, `ROTATE_A`, …). It cannot invent an action, and it cannot move a
+  (`RUSH_B`, `STACK_A`, `RETAKE_B`, …). It cannot invent an action, and it cannot move a
   bot — the game DLL translates intent into its own bot commands. A stale plan is never
   applied, and a watchdog drops the advisor back to stock behaviour if anything stalls.
 - **Measured, not assumed.** The cost of asking the model, the hit rate, and what the
@@ -83,22 +83,14 @@ for intent, and writes that intent back for the game DLL to apply to its bots.
 CS 1.6's source is four separate open-source projects. This stack compiles all four and
 inserts two of its own layers between them:
 
-```
-        ┌───────────────────────── game/ (client, 64-bit) ─────────────────────────┐
-        │  Xash3D-FWGS engine  + MOD ABI  <--patched                                │
-        │      │  loads                                                             │
-        │      └─> game/mods/mod_vr.so   (OpenXR: eyes, hands, weapon, menus)       │
-        │  CS16Client (client DLL + menu) — unmodified                              │
-        └──────────────────────────────────────────────────────────────────────────┘
-
-        ┌──────────────────── server/ (dedicated, 32-bit) ─────────────────────────┐
-        │  ReHLDS engine — unmodified                                               │
-        │  ReGameDLL_CS  + bot advisor  <--patched   (the "fast brain")             │
-        └───────────────┬──────────────────────────────────────────────────────────┘
-                        │  observe_<team>.txt / plan_<team>.txt
-        ┌───────────────┴──────────────────────────────────────────────────────────┐
-        │  tools/botbrain  (Python sidecar, the "slow brain") -> Jev model          │
-        └──────────────────────────────────────────────────────────────────────────┘
+```text
+Xash3D (64-bit) + generic client host + in-game tools
+  └─ game/mods/<id>/client.so       ← SDK v9
+ReHLDS / ReGameDLL (32-bit) + generic server host
+  └─ game/mods/<id>/server.so       ← SDK v1
+Local session supervisor
+  └─ package-declared sidecars     ← bots-jev asks Jev off-process
+Shared state: game/mod-state/<id>/ (session-tagged atomic mailboxes)
 ```
 
 Two upstreams are modified, and both modifications are published here as patches against a
@@ -106,8 +98,8 @@ pinned base revision — see [patches/](patches/):
 
 | Patch | What it adds |
 |---|---|
-| [`xash3d-fwgs-mod-abi`](patches/xash3d-fwgs-mod-abi/) | The **external Mod system**: a frozen C ABI (`mod_api.h`), a loader, the per-eye render loop, the asymmetric frustum, viewmodel/input hooks and the menu canvas — 26 files |
-| [`regamedll-bot-advisor`](patches/regamedll-bot-advisor/) | The bot **advisor**: observe/plan/apply hooks that let an outside brain drive the bots without forking the bot AI |
+| [`xash3d-fwgs-mod-abi`](patches/xash3d-fwgs-mod-abi/) | The **external Mod system**: a versioned C ABI, multi-package loader, per-view rendering, input hooks and integrated debug tools |
+| [`regamedll-mod-host`](patches/regamedll-mod-host/) | The generic **server mod host**, small bot operations and first-spawn equipment fix |
 
 The other two — ReHLDS and CS16Client — are used **unmodified**. Every client-side VR
 feature (barrel aim, snap turn, roomscale crouch, controller input) goes through the engine's
@@ -124,17 +116,33 @@ upstream patches and the four builds, are in [docs/BUILD.md](docs/BUILD.md).**
 ./scripts/build-regamedll.sh     # dedicated server game DLL  (32-bit)
 ./scripts/build-xash.sh          # engine                      (64-bit)
 ./scripts/build-cs16.sh          # client                      (64-bit)
-./mods/vr/build.sh               # the VR Mod
-./mods/null/build.sh             # the template Mod
+./scripts/build-openxr.sh        # OpenXR loader for the VR package
+./scripts/build-mods.sh          # all independent packages
+./scripts/setup-mods.sh          # private sidecar environments
 
 # 3. play
-cd game && ./run-cs.sh                                   # flat
+./scripts/run-cs.sh                                      # flat + Jev bots + x-ray
+(cd game && ./run-cs.sh -nomods)                         # flat reference
 ./scripts/run-cs-vr.sh                                   # VR + bots + headset, one command
 CS_BOTS=0 ./scripts/run-cs-vr.sh                         # VR without the bot server
 ```
 
 Controls, environment variables and tuning knobs are in the [VR section of the
 documentation](docs/HANDS.md).
+
+## Mods and debugging
+
+Copy packages into `game/mods/<id>/` and restart to install; remove a package and
+restart to uninstall. User settings and logs stay in `game/mod-state/<id>/`.
+**F6** opens the manager, **F7** hides/shows panels, **F8** toggles the selected mod.
+Each mod also has configurable direct shortcuts. Activation and panel visibility
+are independent. The default development profile is flat, with Jev and x-ray
+active and VR disabled. Disabling Jev keeps the bots playing with stock AI.
+
+The client SDK is **v9**, the server SDK **v1**. The hosts provide generic lifecycle,
+capability ownership, logs, UI and copied snapshots; each package owns its policy.
+See [docs/XRAY.md](docs/XRAY.md) for the SDK-only example and
+[docs/VALIDATION.md](docs/VALIDATION.md) for verification.
 
 ## Documentation
 
@@ -154,9 +162,14 @@ documentation](docs/HANDS.md).
 mods/            the Mods this project adds
   vr/            the VR Mod (OpenXR): source, assets, cfg, diagnostic tools
   null/          minimal template Mod — copy this to start your own
+  bots-jev/      removable server policy + Python sidecar + debug panel
+  x-ray-debug/   SDK-only player analysis overlay
 patches/         the changes this project makes to its upstreams
-docs/            the four documents above
-tools/botbrain/  the Jev sidecar (Python)
+docs/            SDK, builds, mods and verification evidence
+sdk/            public C contracts and canonical native hosts
+third_party/    pinned Dear ImGui and JSON dependencies
+tools/modhost/  local session supervisor
+tools/botbrain/  compatibility CLI (implementation: mods/bots-jev/)
 scripts/         build and launch scripts
 server/          dedicated server launcher + hand-written configs
 game/            client launcher + hand-written configs
@@ -170,7 +183,7 @@ src/, game/*, server/*   NOT in version control: cloned, built, or downloaded
 | VR Mod | **Playable.** Weapon fit, hands, holster, two-handed grip and barrel aim implemented and verified offline; a short list of things only a headset can confirm is at the end of [docs/HANDS.md](docs/HANDS.md) |
 | Bot advisor | **Working on `de_dust2` only.** Two brains, bounded intents, watchdog; the interesting failure modes are documented |
 | Flat (non-VR) game | **Unchanged** from the upstream stack, by design — every feature is gated |
-| Engine Mod ABI | **v8**, frozen; a Mod that does not match the version is refused at load |
+| Engine Mod ABI | **v9**, sized C ABI + server ABI v1; a Mod that does not match the version is refused at load |
 
 What is explicitly **not** done yet, and will not be started without a reason to: reload and
 grenade-pin gestures, wrist roll, haptics, weapon classes other than `pistol`, VR buy menu,

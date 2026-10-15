@@ -1,14 +1,17 @@
 # CS 1.6.1 documentation
 
-Four documents, each one self-contained. Read the first two if you want to know what this
-project actually does; the third if you want to write code against it.
+Read MODS.md to extend the platform, BUILD.md to reproduce it, and VALIDATION.md
+for measured results and remaining hardware checks.
 
 | Document | What it covers | Read it if you want to… |
 |---|---|---|
 | [**HANDS.md**](HANDS.md) | The VR Mod: its own arms and weapon viewmodel, hand IK, fingers, the holster/grab/drop state machine, two-handed grip, barrel aim — and how the weapon fit is *measured* instead of eyeballed | …understand or change the VR body |
-| [**BOTBRAIN.md**](BOTBRAIN.md) | The two-brain bot AI: the ReGameDLL **advisor** module (fast, in the game DLL) plus the **Jev** sidecar (slow, off-process, LLM-driven), and the file protocol between them | …understand or change how the bots think |
+| [**BOTBRAIN.md**](BOTBRAIN.md) | The two-brain bot AI: the ReGameDLL package server component (fast, loaded by the game DLL) plus the **Jev** sidecar (slow, off-process, LLM-driven), and the file protocol between them | …understand or change how the bots think |
 | [**MODS.md**](MODS.md) | The **Mod ABI** reference: the contract between the engine and an external Mod, every hook, every struct field, capability gating, and the rules a Mod must follow | …write your own Mod |
 | [**BUILD.md**](BUILD.md) | Reproducing the whole stack from upstream sources: content, patches, the four builds, the Mods | …build it yourself |
+
+| [**XRAY.md**](XRAY.md) | SDK-only player overlay and lessons from building it | …create an independent analysis mod |
+| [**VALIDATION.md**](VALIDATION.md) | Automated and live verification, measurements and limits | …assess this implementation |
 
 Also worth reading, at the repository root:
 

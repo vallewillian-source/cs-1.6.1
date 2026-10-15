@@ -1,0 +1,4 @@
+# Patch context intentionally contains a leading space before upstream tabs.
+*.patch -whitespace
+# Preserve vendored upstream files byte-for-byte, including license whitespace.
+third_party/** -whitespace

@@ -23,7 +23,11 @@ import httpx
 ENDPOINT = "https://api.typesafe.ai/v1/systemone"
 DEFAULT_MODEL = "jev-latest"
 
-_CLIENT = httpx.Client(http2=True, timeout=25)
+class TransportError(RuntimeError):
+    """Connection, availability, authentication or HTTP status failure."""
+
+
+_CLIENT = None
 
 
 def load_env(path: Path) -> None:
@@ -39,24 +43,27 @@ def load_env(path: Path) -> None:
 
 
 def _post_json(url: str, key: str, body: dict) -> dict:
+    global _CLIENT
+    if _CLIENT is None:
+        _CLIENT = httpx.Client(http2=True, timeout=httpx.Timeout(3.0, connect=1.0))
     headers = {"Authorization": f"Bearer {key}"}
-    for attempt in range(3):
+    for attempt in range(2):
         try:
             response = _CLIENT.post(url, json=body, headers=headers)
         except httpx.HTTPError as exc:
-            raise RuntimeError(f"TypeSafe connection failed: {exc}") from None
-        if response.status_code in {429, 529, 503} and attempt < 2:
+            raise TransportError(f"TypeSafe connection failed: {exc}") from None
+        if response.status_code in {429, 529, 503} and attempt < 1:
             time.sleep(0.5 * 2**attempt)
             continue
         if response.is_error:
-            raise RuntimeError(
-                f"TypeSafe returned HTTP {response.status_code}: {response.text[:200]}"
-            )
+            raise TransportError(f"TypeSafe returned HTTP {response.status_code}")
         return response.json()
-    raise RuntimeError("TypeSafe unavailable")
+    raise TransportError("TypeSafe unavailable")
 
 
 def _validate_choice(answer: dict, ids: set[str]) -> str:
+    if not isinstance(answer, dict):
+        raise ValueError("operation answer must be an object")
     choice = answer.get("choice")
     if choice not in ids:
         raise ValueError(f"choice {choice!r} not in {sorted(ids)}")
@@ -67,7 +74,7 @@ def _validate_choice(answer: dict, ids: set[str]) -> str:
 
     values = list(probs.values()) + [answer.get("confidence")]
     for value in values:
-        if not isinstance(value, (int, float)) or not math.isfinite(value) or not 0.0 <= value <= 1.0:
+        if type(value) not in (int, float) or not math.isfinite(value) or not 0.0 <= value <= 1.0:
             raise ValueError("probability/confidence out of range")
 
     if abs(sum(probs.values()) - 1.0) > 0.02:
@@ -94,7 +101,7 @@ def choose_operation(
     """
     key = os.environ.get("TYPESAFE_API_KEY")
     if not key:
-        raise RuntimeError("TYPESAFE_API_KEY is not set (expected in ~/Workspace/jev-ultrafast/.env)")
+        raise RuntimeError("TYPESAFE_API_KEY is not set (configure the mod environment or secrets.env)")
 
     ids = set(criteria)
     body = {
@@ -121,6 +128,8 @@ def choose_operation(
     result = _post_json(ENDPOINT, key, body)
     latency_ms = int((time.monotonic() - started) * 1000)
 
+    if not isinstance(result, dict):
+        raise ValueError("response must be an object")
     answers = result.get("answers")
     if not isinstance(answers, dict) or "operation" not in answers:
         raise ValueError("response has no answers.operation")

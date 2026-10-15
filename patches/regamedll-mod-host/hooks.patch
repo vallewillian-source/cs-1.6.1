@@ -1,0 +1,162 @@
+diff --git a/regamedll/CMakeLists.txt b/regamedll/CMakeLists.txt
+index 58632b9..116fb4a 100644
+--- a/regamedll/CMakeLists.txt
++++ b/regamedll/CMakeLists.txt
+@@ -312,6 +312,8 @@ set(GAMEDLL_SRCS
+ 	"dlls/bot/cs_bot_vision.cpp"
+ 	"dlls/bot/cs_bot_weapon.cpp"
+ 	"dlls/bot/cs_gamestate.cpp"
++	"dlls/modhost/server.cpp"
++	"dlls/modhost/runtime.cpp"
+ 	"dlls/bot/states/cs_bot_attack.cpp"
+ 	"dlls/bot/states/cs_bot_buy.cpp"
+ 	"dlls/bot/states/cs_bot_defuse_bomb.cpp"
+@@ -452,3 +454,8 @@ install(TARGETS regamedll
+ 	PERMISSIONS OWNER_READ OWNER_WRITE OWNER_EXECUTE
+ 		GROUP_READ GROUP_EXECUTE
+ 		WORLD_READ WORLD_EXECUTE)
++
++# The host owns exceptions/filesystem locally; the upstream game keeps its flags.
++set_source_files_properties(dlls/modhost/runtime.cpp PROPERTIES COMPILE_FLAGS "-std=c++17 -fexceptions")
++target_include_directories(regamedll PRIVATE dlls/modhost)
++target_link_libraries(regamedll PRIVATE dl pthread)
+diff --git a/regamedll/dlls/bot/cs_bot_init.cpp b/regamedll/dlls/bot/cs_bot_init.cpp
+index 2db6b02..8acb6e0 100644
+--- a/regamedll/dlls/bot/cs_bot_init.cpp
++++ b/regamedll/dlls/bot/cs_bot_init.cpp
+@@ -27,6 +27,7 @@
+ */
+ 
+ #include "precompiled.h"
++#include "dlls/modhost/server.h"
+ 
+ cvar_t cv_bot_enable                 = { "bot_enable", "0", 0, 0.0f, nullptr };
+ cvar_t cv_bot_traceview              = { "bot_traceview", "0", FCVAR_SERVER, 0.0f, nullptr };
+diff --git a/regamedll/dlls/bot/cs_bot_manager.cpp b/regamedll/dlls/bot/cs_bot_manager.cpp
+index 16ad768..618e177 100644
+--- a/regamedll/dlls/bot/cs_bot_manager.cpp
++++ b/regamedll/dlls/bot/cs_bot_manager.cpp
+@@ -27,6 +27,7 @@
+ */
+ 
+ #include "precompiled.h"
++#include "dlls/modhost/server.h"
+ 
+ CBotManager *TheBots = nullptr;
+ 
+@@ -137,6 +138,8 @@ void CCSBotManager::RestartRound()
+ 	m_isRoundOver = false;
+ 	m_isRespawnStarted = false;
+ 	m_canRespawn = true;
++
++	CSModHost_Round();
+ }
+ 
+ // Called each frame
+@@ -155,6 +158,7 @@ void CCSBotManager::StartFrame()
+ 			UTIL_DrawBox(&zone->m_extent, 1, 255, 100, 0);
+ 		}
+ 	}
++
+ }
+ 
+ // Return true if the bot can use this weapon
+diff --git a/regamedll/dlls/bot/cs_bot_update.cpp b/regamedll/dlls/bot/cs_bot_update.cpp
+index de75bf6..297626a 100644
+--- a/regamedll/dlls/bot/cs_bot_update.cpp
++++ b/regamedll/dlls/bot/cs_bot_update.cpp
+@@ -27,6 +27,7 @@
+ */
+ 
+ #include "precompiled.h"
++#include "dlls/modhost/server.h"
+ 
+ // Lightweight maintenance, invoked frequently
+ void CCSBot::Upkeep()
+@@ -769,6 +770,9 @@ void CCSBot::Update()
+ 		}
+ 	}
+ 
++	// Let the external advisor steer this bot's team (no-op when advisor_enable is 0)
++	CSModHost_Bot(this);
++
+ 	// Execute state machine
+ 	if (m_isAttacking)
+ 	{
+diff --git a/regamedll/dlls/client.cpp b/regamedll/dlls/client.cpp
+index daee11d..6343321 100644
+--- a/regamedll/dlls/client.cpp
++++ b/regamedll/dlls/client.cpp
+@@ -1,4 +1,5 @@
+ #include "precompiled.h"
++#include "dlls/modhost/server.h"
+ 
+ int gmsgWeapPickup = 0;
+ int gmsgHudText = 0;
+@@ -3787,6 +3788,7 @@ void EXT_FUNC ClientUserInfoChanged(edict_t *pEntity, char *infobuffer)
+ 
+ void EXT_FUNC ServerDeactivate()
+ {
++	CSModHost_MapEnd();
+ 	// It's possible that the engine will call this function more times than is necessary
+ 	// Therefore, only run it one time for each call to ServerActivate
+ 	if (!g_bServerActive)
+@@ -3926,6 +3928,7 @@ void EXT_FUNC ParmsChangeLevel()
+ 
+ void EXT_FUNC StartFrame()
+ {
++	CSModHost_Frame();
+ 	if (g_pGameRules)
+ 	{
+ 		g_pGameRules->Think();
+diff --git a/regamedll/dlls/game.cpp b/regamedll/dlls/game.cpp
+index 7f3e810..943b02d 100644
+--- a/regamedll/dlls/game.cpp
++++ b/regamedll/dlls/game.cpp
+@@ -1,4 +1,5 @@
+ #include "precompiled.h"
++#include "dlls/modhost/server.h"
+ 
+ cvar_t *g_pskill          = nullptr;
+ cvar_t *g_psv_gravity     = nullptr;
+@@ -261,6 +262,7 @@ SpewRetval_t GameDLL_SpewHandler(SpewType_t spewType, int level, const char *pMs
+ 
+ void EXT_FUNC GameDLLInit()
+ {
++	CSModHost_Init();
+ 	// By default, direct dbg reporting...
+ 	SpewOutputFunc(GameDLL_SpewHandler);
+ 
+diff --git a/regamedll/dlls/multiplay_gamerules.cpp b/regamedll/dlls/multiplay_gamerules.cpp
+index 3c7176e..4f202ee 100644
+--- a/regamedll/dlls/multiplay_gamerules.cpp
++++ b/regamedll/dlls/multiplay_gamerules.cpp
+@@ -3830,9 +3830,13 @@ LINK_HOOK_CLASS_VOID_CUSTOM_CHAIN(CHalfLifeMultiplay, CSGameRules, PlayerSpawn,
+ // Purpose: Player has just spawned. Equip them.
+ void EXT_FUNC CHalfLifeMultiplay::__API_HOOK(PlayerSpawn)(CBasePlayer *pPlayer)
+ {
+-	// This is tied to the joining state (m_iJoiningState).. add it when the joining state is there.
+-	if (pPlayer->m_bJustConnected)
+-		return;
++	// A checagem de "acabou de conectar" desviava esta função INTEIRA — inclusive
++	// o OnSpawnEquip() abaixo — e como é o próprio OnSpawnEquip que zera
++	// m_bJustConnected (player.cpp), a flag nunca caía: o jogador nunca era
++	// equipado e ficava SEM ARMA NA MÃO em qualquer modo (e sem viewmodel no
++	// clientdata, que é o que o cliente desenha). Agora a flag desvia só o que
++	// vem DEPOIS do equipamento, que é o que ela pretendia evitar.
++	const bool bJustConnected = pPlayer->m_bJustConnected;
+ 
+ #ifdef REGAMEDLL_ADD
+ 	int iAutoWepSwitch = pPlayer->m_iAutoWepSwitch;
+@@ -3841,6 +3845,11 @@ void EXT_FUNC CHalfLifeMultiplay::__API_HOOK(PlayerSpawn)(CBasePlayer *pPlayer)
+ 
+ 	pPlayer->pev->weapons |= (1 << WEAPON_SUIT);
+ 	pPlayer->OnSpawnEquip();
++
++	// This is tied to the joining state (m_iJoiningState).. add it when the joining state is there.
++	if (bJustConnected)
++		return;
++
+ 	pPlayer->SetPlayerModel(false);
+ 
+ #ifdef REGAMEDLL_ADD

@@ -1,0 +1,26 @@
+{
+  "manifest_version": 1,
+  "id": "bots-jev",
+  "name": "Bots · Jev",
+  "version": "1.0.0",
+  "client_abi": 9,
+  "server_abi": 1,
+  "components": {
+    "client": "client.so",
+    "server": "server.so",
+    "sidecar": [
+      "python",
+      "sidecar/brain.py"
+    ]
+  },
+  "claims": [
+    "bots"
+  ],
+  "defaults": {
+    "enabled": false,
+    "panel": true
+  },
+  "capabilities": [
+    "debug-panel"
+  ]
+}

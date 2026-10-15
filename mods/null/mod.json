@@ -1,0 +1,17 @@
+{
+  "manifest_version": 1,
+  "id": "null",
+  "name": "Exemplo mínimo",
+  "version": "1.0.0",
+  "client_abi": 9,
+  "server_abi": 1,
+  "components": {
+    "client": "client.so"
+  },
+  "claims": [],
+  "defaults": {
+    "enabled": false,
+    "panel": false
+  },
+  "capabilities": []
+}
