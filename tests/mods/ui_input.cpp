@@ -21,6 +21,29 @@ int main(int argc,char **argv) {
     auto p=ImGui::GetWindowPos(),s=ImGui::GetWindowSize();
     assert(p.x>=8&&p.x+s.x<=1272&&p.y+s.y<=712);
     ImGui::End();ImGui::Render();
+    // Exercise SDL button events and real ImGui press/release activation.
+    assert(SDL_Init(SDL_INIT_VIDEO)==0);
+    window=SDL_CreateWindow("input test",0,0,1280,720,SDL_WINDOW_HIDDEN);assert(window);
+    assert(ImGui_ImplSDL2_InitForOther(window));
+    bool clicked=false;ImVec2 target;
+    auto button_frame=[&]{
+        ImGui::NewFrame();ImGui::SetNextWindowPos({10,10});
+        ImGui::Begin("button test");clicked=ImGui::Button("Activate");
+        auto a=ImGui::GetItemRectMin(),b=ImGui::GetItemRectMax();target={(a.x+b.x)/2,(a.y+b.y)/2};
+        ImGui::End();ImGui::Render();
+    };
+    button_frame();button_frame();
+    SDL_Event event{};event.type=SDL_MOUSEMOTION;event.motion.windowID=SDL_GetWindowID(window);
+    event.motion.x=int(target.x);event.motion.y=int(target.y);assert(ModUI_Event(&event));button_frame();
+    event={};event.type=SDL_MOUSEBUTTONDOWN;event.button.windowID=SDL_GetWindowID(window);event.button.button=SDL_BUTTON_LEFT;
+    event.button.x=int(target.x);event.button.y=int(target.y);
+    assert(ModUI_Event(&event));button_frame();assert(!clicked);
+    event.type=SDL_MOUSEBUTTONUP;assert(ModUI_Event(&event));button_frame();assert(clicked);
+    manager=false;ModUI_GameMenu(1);assert(ModUI_Capturing());
+    event.type=SDL_MOUSEBUTTONDOWN;assert(ModUI_Event(&event));button_frame();
+    event.type=SDL_MOUSEBUTTONUP;assert(ModUI_Event(&event));button_frame();assert(clicked);
+    ModUI_GameMenu(0);assert(!ModUI_Capturing());manager=true;
+    ImGui_ImplSDL2_Shutdown();SDL_DestroyWindow(window);window=nullptr;SDL_Quit();
     ImGui::GetIO().WantTextInput=true;
     ModUI_Key('z',1);ModUI_Key('z',0);
     ModUI_Key('p',1);ModUI_Key('p',0);

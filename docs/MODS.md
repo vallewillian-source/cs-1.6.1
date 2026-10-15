@@ -126,7 +126,10 @@ endpoint. Remote debugging and remote server control are outside this version.
 | `mod_panel <id> [0|1]` | Change panel visibility |
 
 Panels are passive during gameplay. F6 enables interaction and releases gameplay
-input. Closing the manager or losing focus releases captured input. Each panel has
+input. Opening the native game menu with Esc also makes the panels interactive;
+clicks over a panel go to its controls, while the native menu keeps working outside
+the panels. The engine owns cursor visibility during ordinary gameplay. Closing
+the manager or losing focus releases captured input. Each panel has
 independent visibility, filtering, severity, pause and clear controls. Window
 geometry, panel visibility and shortcuts persist under `mod-state/host/`.
 

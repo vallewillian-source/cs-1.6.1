@@ -13,6 +13,6 @@ c++ -std=c++17 -O0 -pthread -Isdk/host -Isdk/include -Ithird_party/json \
   third_party/imgui/backends/imgui_impl_opengl2.cpp -lSDL2 -lGL -ldl -o build/validation/ui-input
 task_state=$(mktemp -d)
 trap '\''rm -rf "$task_state"'\'' EXIT
-build/validation/ui-input "$task_state"
-echo "PASS UI typing, shortcut capture cleanup and gameplay shortcuts"
+SDL_VIDEODRIVER=dummy build/validation/ui-input "$task_state"
+echo "PASS SDL button clicks, Esc-menu interaction, typing, shortcut cleanup and window bounds"
 '

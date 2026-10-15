@@ -36,6 +36,7 @@ int MH_Metrics( mh_mod_t *mod, char *out, int capacity );
 int MH_Status( mh_mod_t *mod, char *out, int capacity ); /* confirmed components */
 int MH_Health( mh_mod_t *mod ); /* 1=all active, 0=inactive/pending, -1=component error */
 void MH_UITelemetry( int capture, int panels, int selected, double frame_ms );
+void MH_UIPointer( float x, float y, int buttons, int relative, int manager, int menu );
 int MH_Managed( void );
 const char *MH_StateRoot( void );
 const char *MH_Session( void );
@@ -45,6 +46,8 @@ void ModUI_Shutdown( void );
 int ModUI_Event( void *sdl_event );
 int ModUI_Key( int key, int down );
 int ModUI_Capturing( void );
+int ModUI_ManagerOpen( void );
+void ModUI_GameMenu( int visible );
 void ModUI_Draw( void );
 void ModUI_World( const csmod_view_t *view );
 /* Implemented by the engine host; called with GL state guarded by UI glue. */

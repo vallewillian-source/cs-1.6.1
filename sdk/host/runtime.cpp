@@ -52,6 +52,7 @@ bool stopped=false, managed=false, preferences_dirty=false;
 uint64_t request_seq=0;
 json disk_control, requests=json::array(), preferences=json::object();
 int ui_capture=0,ui_panels=1,ui_selected=0;double ui_frame_ms=0;
+float ui_mouse_x=0,ui_mouse_y=0;int ui_mouse_buttons=0,ui_relative=0,ui_manager=0,ui_menu=0;
 double clock_now() { return std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count(); }
 void strcopy(char *out, size_t n, const std::string& value) { std::snprintf(out,n,"%s",value.c_str()); }
 bool valid_id(const std::string& s) {
@@ -191,7 +192,8 @@ void io_tick() {
             ack["mods"][mods[i].id]={{"enabled",bool(a.active)},{"desired",bool(a.desired)},
                 {"initialized",bool(a.initialized)},{"error",a.error},{"generation",a.generation}};
         }
-        if(origin=="client")ack["ui"]={{"capture",ui_capture},{"panels",ui_panels},{"selected",ui_selected},{"frame_ms",ui_frame_ms}};
+        if(origin=="client")ack["ui"]={{"capture",ui_capture},{"panels",ui_panels},{"selected",ui_selected},{"frame_ms",ui_frame_ms},
+            {"mouse_x",ui_mouse_x},{"mouse_y",ui_mouse_y},{"mouse_buttons",ui_mouse_buttons},{"relative_mouse",ui_relative},{"manager",ui_manager},{"game_menu",ui_menu}};
     }
     atomic_json(fs::path(state_root)/"host"/(origin+".json"),ack);
     for(int i=0;i<count;i++) {
@@ -343,6 +345,7 @@ int MH_Status(mh_mod_t *m,char *out,int capacity) {
 }
 int MH_Health(mh_mod_t *m) {std::lock_guard<std::mutex> g(lock);return managed?data[index_of(m)].health:m->active;}
 void MH_UITelemetry(int capture,int panels,int selected,double frame_ms){std::lock_guard<std::mutex> g(lock);ui_capture=capture;ui_panels=panels;ui_selected=selected;ui_frame_ms=frame_ms;}
+void MH_UIPointer(float x,float y,int buttons,int relative,int manager,int menu){std::lock_guard<std::mutex> g(lock);ui_mouse_x=x;ui_mouse_y=y;ui_mouse_buttons=buttons;ui_relative=relative;ui_manager=manager;ui_menu=menu;}
 void MH_Shutdown() {
     if(!worker.joinable()) return;
     {std::lock_guard<std::mutex> g(lock);stopped=true;}

@@ -97,6 +97,7 @@ void Mods_FramePre(double time)
 {
     int i,capture;
     if(!initialized) return;
+    ModUI_GameMenu(cls.key_dest==key_menu);
     MH_Sync();
     for(i=0;i<MH_Count();i++) {
         mh_mod_t *m=MH_At(i);
@@ -123,8 +124,10 @@ void Mods_FramePre(double time)
         clearing_keys=true; Key_ClearStates(); clearing_keys=false;
         IN_ClearMouseState(); capture_previous=capture;
         if(capture) IN_DeactivateMouse();
-        else if(cls.key_dest==key_game) IN_ActivateMouse();
+        else if(cls.key_dest==key_game&&host.status==HOST_FRAME) IN_ActivateMouse();
     }
+    // Client UI code can request mouse activation again; keep gameplay suspended.
+    if(capture) IN_DeactivateMouse();
 }
 void Mods_FramePost(double time)
 {
@@ -143,10 +146,10 @@ void Mods_Shutdown(void)
 void Mods_Input(void)
 {
     mh_mod_t *m=Owner(MOD_CAP_INPUT);input_valid=false;
-    if(!m||!API(m)->Mod_Input||ModUI_Capturing())return;
+    if(!m||!API(m)->Mod_Input||ModUI_ManagerOpen())return;
     memset(&sample,0,sizeof(sample));API(m)->Mod_Input(&sample);input_valid=true;
 }
-qboolean Mods_GetInput(mod_input_sample_t *out) {if(!input_valid||ModUI_Capturing())return false;*out=sample;return true;}
+qboolean Mods_GetInput(mod_input_sample_t *out) {if(!input_valid||ModUI_ManagerOpen())return false;*out=sample;return true;}
 void Mods_Camera(ref_viewpass_t *rvp,int eye)
 {
     mh_mod_t *m=Owner(MOD_CAP_DISPLAY);mod_view_t v;int old[4];
@@ -171,7 +174,7 @@ qboolean Mods_Key(int key,int down)
 void Mods_VideoInit(void *window,void *context) {video.window=window;video.gl_context=context;if(initialized)ModUI_Init(window,context);}
 void Mods_BeginFrame(void) {mh_mod_t *m=Owner(MOD_CAP_DISPLAY);if(m&&API(m)->Mod_BeginFrame)API(m)->Mod_BeginFrame(&video);}
 void Mods_EndFrame(void) {mh_mod_t *m=Owner(MOD_CAP_DISPLAY);if(m&&API(m)->Mod_EndFrame)API(m)->Mod_EndFrame();}
-qboolean Mods_Hud(mod_hud_t *h) {mh_mod_t *m=Owner(MOD_CAP_HUD);if(!m||!API(m)->Mod_Hud||ModUI_Capturing())return false;API(m)->Mod_Hud(h);return true;}
+qboolean Mods_Hud(mod_hud_t *h) {mh_mod_t *m=Owner(MOD_CAP_HUD);if(!m||!API(m)->Mod_Hud||ModUI_ManagerOpen())return false;API(m)->Mod_Hud(h);return true;}
 void Mods_Overlay2D(void)
 {
     int i;for(i=0;i<MH_Count();i++) {mh_mod_t *m=MH_At(i);if(m->active&&API(m)&&(API(m)->capabilities&MOD_CAP_HUD)&&API(m)->Mod_Overlay2D)API(m)->Mod_Overlay2D();}

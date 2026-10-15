@@ -543,7 +543,7 @@ index 2203268..2766b94 100644
  		return;
  
 diff --git a/engine/client/input/input.c b/engine/client/input/input.c
-index 09dfa2a..2d01ba7 100644
+index 09dfa2a..4a9511c 100644
 --- a/engine/client/input/input.c
 +++ b/engine/client/input/input.c
 @@ -25,6 +25,8 @@ GNU General Public License for more details.
@@ -594,7 +594,19 @@ index 09dfa2a..2d01ba7 100644
  	qboolean use_raw_input;
  
  #if XASH_WIN32
-@@ -331,6 +351,199 @@ void IN_DeactivateMouse( void )
+@@ -302,6 +322,11 @@ Called when the window gains focus or changes in some way
+ */
+ void IN_ActivateMouse( void )
+ {
++	if( ModUI_Capturing())
++	{
++		IN_DeactivateMouse();
++		return;
++	}
+ 	if( !in_mouseinitialized )
+ 		return;
+ 
+@@ -331,6 +356,199 @@ void IN_DeactivateMouse( void )
  
  
  
@@ -794,15 +806,16 @@ index 09dfa2a..2d01ba7 100644
  /*
  ================
  IN_MouseMove
-@@ -338,6 +551,7 @@ IN_MouseMove
+@@ -338,6 +556,8 @@ IN_MouseMove
  */
  static void IN_MouseMove( void )
  {
-+	if( ModUI_Capturing()) return;
++	// The native pause menu still needs cursor positions outside mod windows.
++	if( ModUI_Capturing() && cls.key_dest == key_game ) return;
  	static int oldx, oldy;
  
  	if( !in_mouseinitialized )
-@@ -350,9 +564,14 @@ static void IN_MouseMove( void )
+@@ -350,9 +570,14 @@ static void IN_MouseMove( void )
  		return;
  	}
  
@@ -819,7 +832,7 @@ index 09dfa2a..2d01ba7 100644
  
  	// touchscreen moves the cursor on its own, don't drag it back to where the mouse is left
  	if( x == oldx && y == oldy )
-@@ -464,6 +683,7 @@ void IN_Init( void )
+@@ -464,6 +689,7 @@ void IN_Init( void )
  	Cvar_RegisterVariable( &cl_forwardspeed );
  	Cvar_RegisterVariable( &cl_backspeed );
  	Cvar_RegisterVariable( &cl_sidespeed );
@@ -827,7 +840,7 @@ index 09dfa2a..2d01ba7 100644
  
  	if( !Host_IsDedicated() )
  	{
-@@ -652,6 +872,92 @@ void IN_EngineAppendMove( float frametime, usercmd_t *cmd, qboolean active )
+@@ -652,6 +878,92 @@ void IN_EngineAppendMove( float frametime, usercmd_t *cmd, qboolean active )
  	}
  }
  

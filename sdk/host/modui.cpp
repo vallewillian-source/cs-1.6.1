@@ -18,6 +18,15 @@ namespace {
 SDL_Window *window=nullptr;
 ImGuiContext *main_ctx=nullptr,*world_ctx=nullptr;
 bool manager=false, all_panels=true;
+bool game_menu=false,pointer_valid=false;
+ImVec2 pointer_position;
+std::vector<ImVec4> tool_bounds;
+bool interactive(){return manager||game_menu;}
+bool over_tool(){
+    if(!pointer_valid)return false;
+    for(auto r:tool_bounds)if(pointer_position.x>=r.x&&pointer_position.y>=r.y&&pointer_position.x<r.z&&pointer_position.y<r.w)return true;
+    return false;
+}
 int selected=0;
 int *capture_binding=nullptr;
 std::string binding_error;
@@ -110,6 +119,7 @@ void keep_window_visible() {
     p.x=std::clamp(p.x,8.f,std::max(8.f,display.x-s.x-8));
     p.y=std::clamp(p.y,8.f,std::max(8.f,display.y-s.y-8));
     ImGui::SetWindowPos(p);
+    tool_bounds.push_back({p.x,p.y,p.x+s.x,p.y+s.y});
 }
 void show_manager() {
     ImGui::SetNextWindowSize({680,430},ImGuiCond_FirstUseEver);
@@ -150,7 +160,7 @@ void show_panel(int i,int w,int h) {
     ImGui::SetNextWindowSize({width,std::min(450.f,float(h-80))},ImGuiCond_FirstUseEver);
     ImGui::SetNextWindowPos({i%2?float(w)-width-18.f:18.f,65.f+float(i/2)*90},ImGuiCond_FirstUseEver);
     std::string title=std::string(m->title)+" · Debug###"+m->id;
-    auto flags=manager?ImGuiWindowFlags_None:ImGuiWindowFlags_NoInputs;
+    auto flags=interactive()?ImGuiWindowFlags_None:ImGuiWindowFlags_NoInputs;
     constrain_window();
     bool expanded=ImGui::Begin(title.c_str(),&open,flags);keep_window_visible();
     if(expanded) {
@@ -200,14 +210,27 @@ void ModUI_Init(void *win,void *context) {
     bind_buffer=reinterpret_cast<BindBuffer>(SDL_GL_GetProcAddress("glBindBuffer"));
     use_program=reinterpret_cast<UseProgram>(SDL_GL_GetProcAddress("glUseProgram"));
 }
-int ModUI_Capturing() {return main_ctx&&manager;}
+int ModUI_Capturing() {return main_ctx&&interactive();}
+int ModUI_ManagerOpen() {return main_ctx&&manager;}
+void ModUI_GameMenu(int visible) {game_menu=visible!=0;}
 int ModUI_Event(void *ptr) {
     if(!main_ctx)return 0;
     ImGui::SetCurrentContext(main_ctx);
-    auto *e=static_cast<SDL_Event*>(ptr);ImGui_ImplSDL2_ProcessEvent(e);
-    if(e->type==SDL_WINDOWEVENT&&e->window.event==SDL_WINDOWEVENT_FOCUS_LOST) {manager=false;capture_binding=nullptr;key_down.fill(false);consumed.fill(false);}
+    auto *e=static_cast<SDL_Event*>(ptr);
+    if(e->type==SDL_MOUSEMOTION&&e->motion.windowID==SDL_GetWindowID(window)) {
+        pointer_position={float(e->motion.x),float(e->motion.y)};pointer_valid=true;
+    }
+    if((e->type==SDL_MOUSEBUTTONDOWN||e->type==SDL_MOUSEBUTTONUP)&&e->button.windowID==SDL_GetWindowID(window)) {
+        pointer_position={float(e->button.x),float(e->button.y)};pointer_valid=true;
+        // Button events carry the authoritative position, even without a motion event.
+        ImGui::GetIO().AddMousePosEvent(pointer_position.x,pointer_position.y);
+    }
+    ImGui_ImplSDL2_ProcessEvent(e);
+    if(e->type==SDL_WINDOWEVENT&&e->window.event==SDL_WINDOWEVENT_FOCUS_LOST) {manager=false;pointer_valid=false;capture_binding=nullptr;key_down.fill(false);consumed.fill(false);}
     if(e->type==SDL_KEYDOWN||e->type==SDL_KEYUP)return 0; // engine routes keys to ModUI_Key
-    return manager&&(e->type==SDL_MOUSEMOTION||e->type==SDL_MOUSEBUTTONDOWN||e->type==SDL_MOUSEBUTTONUP||e->type==SDL_MOUSEWHEEL||e->type==SDL_TEXTINPUT);
+    bool mouse=e->type==SDL_MOUSEMOTION||e->type==SDL_MOUSEBUTTONDOWN||e->type==SDL_MOUSEBUTTONUP||e->type==SDL_MOUSEWHEEL;
+    return ((manager||(game_menu&&(over_tool()||ImGui::GetIO().WantCaptureMouse)))&&mouse)
+        ||(interactive()&&ImGui::GetIO().WantTextInput&&e->type==SDL_TEXTINPUT);
 }
 int ModUI_Key(int key,int down) {
     if(!main_ctx||key<0||key>=256)return 0;
@@ -232,12 +255,12 @@ int ModUI_Key(int key,int down) {
     else if(key==142) {if(edge)if(auto *m=MH_At(selected)){if(!m->desired)m->error[0]=0;MH_Request(m,!m->desired);}used=true;}
     else if(manager&&key==27) {if(edge)manager=false;used=true;}
     else if(manager&&(key==128||key==129)) {if(edge&&MH_Count())selected=(selected+(key==128?MH_Count()-1:1))%MH_Count();used=true;}
-    else if((key<140||key>143)&&!(manager&&ImGui::GetIO().WantTextInput)) for(int i=0;i<MH_Count();i++) {
+    else if((key<140||key>143)&&!(interactive()&&ImGui::GetIO().WantTextInput)) for(int i=0;i<MH_Count();i++) {
         auto *m=MH_At(i);
         if(key&&key==m->toggle_key){if(edge){m->error[0]=0;MH_Request(m,!m->desired);}used=true;}
         if(key&&key==m->panel_key){if(edge){m->panel=!m->panel;MH_Preferences();}used=true;}
     }
-    if(manager)used=true;
+    if(manager||(game_menu&&ImGui::GetIO().WantTextInput))used=true;
     else capture_binding=nullptr;
     if(down&&used)consumed[key]=true;
     if(!down&&consumed[key]){consumed[key]=false;return 1;}
@@ -247,9 +270,18 @@ void ModUI_Draw() {
     if(!main_ctx)return;
     ImGui::SetCurrentContext(main_ctx);
     GLGuard guard;
-    ImGui_ImplOpenGL2_NewFrame();ImGui_ImplSDL2_NewFrame();ImGui::NewFrame();
-    MH_UITelemetry(manager,all_panels,selected,ImGui::GetIO().DeltaTime*1000.0);
+    auto& io=ImGui::GetIO();
+    if(manager)io.ConfigFlags&=~ImGuiConfigFlags_NoMouseCursorChange;
+    else io.ConfigFlags|=ImGuiConfigFlags_NoMouseCursorChange;
+    ImGui_ImplOpenGL2_NewFrame();ImGui_ImplSDL2_NewFrame();
+    // Keep SDL's window-local events authoritative over the global-pointer fallback.
+    if(interactive()&&pointer_valid)io.AddMousePosEvent(pointer_position.x,pointer_position.y);
+    ImGui::NewFrame();
+    auto& input=ImGui::GetIO();
+    MH_UIPointer(input.MousePos.x,input.MousePos.y,input.MouseDown[0]|(input.MouseDown[1]<<1),SDL_GetRelativeMouseMode(),manager,game_menu);
+    MH_UITelemetry(interactive(),all_panels,selected,ImGui::GetIO().DeltaTime*1000.0);
     int w,h;SDL_GetWindowSize(window,&w,&h);
+    tool_bounds.clear();
     if(manager)show_manager();
     if(all_panels)for(int i=0;i<MH_Count();i++)if(MH_At(i)->panel)show_panel(i,w,h);
     ImGui::Render();

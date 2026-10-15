@@ -135,6 +135,7 @@ documentation](docs/HANDS.md).
 Copy packages into `game/mods/<id>/` and restart to install; remove a package and
 restart to uninstall. User settings and logs stay in `game/mod-state/<id>/`.
 **F6** opens the manager, **F7** hides/shows panels, **F8** toggles the selected mod.
+Esc also makes visible panels clickable while the native game menu is open.
 Each mod also has configurable direct shortcuts. Activation and panel visibility
 are independent. The default development profile is flat, with Jev and x-ray
 active and VR disabled. Disabling Jev keeps the bots playing with stock AI.

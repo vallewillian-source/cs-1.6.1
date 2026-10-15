@@ -83,3 +83,26 @@ remote servers are not part of this validation. Fresh patch application and
 rebuilds were verified, but an empty-machine Steam download/toolchain bootstrap
 was not repeated. See [XRAY.md](XRAY.md) for SDK lessons and [MODS.md](MODS.md) for
 extension boundaries.
+
+## Mouse interaction correction
+
+The initial validation covered keyboard activation but did not establish pointer
+activation. Follow-up testing exposed that Esc left debug windows passive, while
+the SDL UI backend could show a cursor during gameplay. This integration now
+allows panel interaction with the native pause menu open, gates mouse reactivation,
+and uses window-local motion/button coordinates instead of replacing a click with
+the global-pointer fallback. Native menu cursor movement remains available outside
+the tool windows. VR menu-pointer callbacks remain enabled outside the F6 manager.
+
+The SDL/ImGui harness now sends actual motion/down/up events and verifies button
+activation with both F6 and native-menu interaction states. The engine was rebuilt;
+the 17 contract tests and fresh patch verification passed again. Native SDL event
+injection into the running client also toggled packages from manager and panel
+buttons, including panels with only the Esc menu open. These events traversed the
+engine loop, rather than calling widget callbacks. Hardware pointer behavior on
+other desktop/compositor configurations is not established by event injection.
+
+Manual regression: open F6, toggle a mod using its button, close F6, open Esc,
+and toggle it again from its panel. Check team checkboxes, log controls and window
+dragging. Return to gameplay and confirm cursor hiding and camera control; repeat
+after changing focus. Keep bots-jev and x-ray-debug enabled and VR disabled.

@@ -554,3 +554,11 @@ memory soak remain explicitly unverified.
 Delivery profile: `flat-dev`, de_dust2, eight bots, bots-jev + x-ray-debug enabled,
 VR disabled, Bots and X-ray panels visible. See `docs/MODS.md`, `docs/BUILD.md`,
 `docs/XRAY.md` and `AGENTS.md` for extending and reproducing the platform.
+
+### Mouse input follow-up
+
+Corrected debug interaction when the native Esc menu is open, prevented passive
+panels from changing gameplay cursor visibility, and preserved authoritative
+SDL button coordinates. Mouse acquisition cannot reactivate the game client while
+the tools own input. Added an actual SDL/ImGui button press/release regression,
+retained VR/native-menu pointer paths and rebuilt the published engine integration.
